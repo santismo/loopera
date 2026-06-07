@@ -345,7 +345,7 @@ final class AudioLoopEngine {
 
     private func crossfadeSampleCount(for sampleCount: Int) -> Int {
         guard sampleCount > 64 else { return 0 }
-        return min(sampleCount / 2, max(8, Int(sampleRate * 0.02)))
+        return min(sampleCount / 2, max(8, Int(sampleRate * 0.045)))
     }
 
 }

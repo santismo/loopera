@@ -96,6 +96,9 @@ struct LoopPlayerView: NSViewRepresentable {
         private var timeObserver: Any?
         private var wasPlaying = false
         private var lastSyncCorrection = Date.distantPast
+        private weak var playerLayer: AVPlayerLayer?
+        private var waitingForFirstBoundary = false
+        private let visualPhaseDelay: TimeInterval = 0.04
 
         @MainActor
         func configure(
@@ -121,6 +124,7 @@ struct LoopPlayerView: NSViewRepresentable {
                 currentStartOffset = startOffset
                 currentDuration = duration
                 wasPlaying = false
+                waitingForFirstBoundary = duration > 0 && syncTime.truncatingRemainder(dividingBy: duration) > 0.06
 
                 let item = AVPlayerItem(url: url)
                 item.preferredForwardBufferDuration = 0
@@ -140,9 +144,15 @@ struct LoopPlayerView: NSViewRepresentable {
                     looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
                 }
                 player = queuePlayer
+                playerLayer = layer
                 layer.player = queuePlayer
                 layer.videoGravity = .resizeAspectFill
-                let initialSeconds = duration > 0 ? syncTime.truncatingRemainder(dividingBy: duration) : 0
+                layer.opacity = waitingForFirstBoundary ? 0 : 1
+                let initialSeconds = waitingForFirstBoundary ? 0 : targetVideoSeconds(
+                    syncTime: syncTime,
+                    syncTimeUpdatedAt: syncTimeUpdatedAt,
+                    duration: duration
+                )
                 let initialTime = CMTimeAdd(start, CMTime(seconds: max(0, initialSeconds), preferredTimescale: 600))
                 queuePlayer.seek(to: initialTime, toleranceBefore: .zero, toleranceAfter: .zero)
                 playbackClock.update(slotID: slotID, seconds: max(0, initialSeconds))
@@ -161,6 +171,16 @@ struct LoopPlayerView: NSViewRepresentable {
             player?.audioOutputDeviceUniqueID = audioOutputDeviceID
             playbackClock.setPlaying(slotID: slotID, isPlaying: isPlaying)
             if isPlaying {
+                if waitingForFirstBoundary, duration > 0 {
+                    let audioPhase = audioPhaseSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
+                    if audioPhase > 0.06 {
+                        player?.pause()
+                        wasPlaying = isPlaying
+                        return
+                    }
+                    waitingForFirstBoundary = false
+                    playerLayer?.opacity = 1
+                }
                 if !wasPlaying {
                     syncVideoToClock(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, startOffset: startOffset, duration: duration, force: true)
                 } else {
@@ -186,8 +206,7 @@ struct LoopPlayerView: NSViewRepresentable {
                 return
             }
 
-            let targetSeconds = (syncTime + Date().timeIntervalSince(syncTimeUpdatedAt))
-                .truncatingRemainder(dividingBy: duration)
+            let targetSeconds = targetVideoSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
             guard targetSeconds.isFinite, targetSeconds >= 0 else { return }
             let currentSeconds = max(0, player.currentTime().seconds - startOffset)
                 .truncatingRemainder(dividingBy: duration)
@@ -200,7 +219,7 @@ struct LoopPlayerView: NSViewRepresentable {
             } else {
                 wrappedDelta = rawDelta
             }
-            guard force || abs(wrappedDelta) > 0.04 else { return }
+            guard force || abs(wrappedDelta) > 0.025 else { return }
 
             let target = CMTimeAdd(
                 CMTime(seconds: startOffset, preferredTimescale: 600),
@@ -208,6 +227,22 @@ struct LoopPlayerView: NSViewRepresentable {
             )
             player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
             lastSyncCorrection = Date()
+        }
+
+        private func audioPhaseSeconds(syncTime: TimeInterval, syncTimeUpdatedAt: Date, duration: TimeInterval) -> TimeInterval {
+            guard duration > 0 else { return 0 }
+            let phase = (syncTime + Date().timeIntervalSince(syncTimeUpdatedAt))
+                .truncatingRemainder(dividingBy: duration)
+            return phase.isFinite && phase >= 0 ? phase : 0
+        }
+
+        private func targetVideoSeconds(syncTime: TimeInterval, syncTimeUpdatedAt: Date, duration: TimeInterval) -> TimeInterval {
+            guard duration > 0 else { return 0 }
+            let delayed = audioPhaseSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration) - visualPhaseDelay
+            if delayed < 0 {
+                return 0
+            }
+            return delayed.truncatingRemainder(dividingBy: duration)
         }
 
         deinit {
