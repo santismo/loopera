@@ -12,6 +12,8 @@ struct StageView: View {
     @State private var livePreviewZoom = 1.0
     @State private var livePreviewShape: LoopSlotShape = .roundedSquare
     @State private var dragPositions: [UUID: CGPointUnit] = [:]
+    @State private var layoutName = "Default"
+    @State private var savedLayoutNames: [String] = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,6 +26,12 @@ struct StageView: View {
                     livePreview(in: proxy.size)
 
                     loopLayer(in: proxy.size)
+
+                    if editMode {
+                        editControlsOverlay
+                            .padding(12)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    }
                 }
                 .coordinateSpace(name: "stage")
             }
@@ -41,6 +49,7 @@ struct StageView: View {
             capture.deleteSelected()
         }
         .onAppear {
+            refreshSavedLayouts()
             capture.requestAccessAndStart()
         }
         .onChange(of: editMode) { _, isEditing in
@@ -177,17 +186,7 @@ struct StageView: View {
                 }
                 .disabled(editMode)
 
-                Button {
-                    saveLayout()
-                } label: {
-                    Label("Save Layout", systemImage: "square.and.arrow.down")
-                }
-
-                Button {
-                    loadLayout()
-                } label: {
-                    Label("Load Layout", systemImage: "square.and.arrow.up")
-                }
+                layoutPresetControls
 
                 Button {
                     if performance.isRecording {
@@ -212,93 +211,6 @@ struct StageView: View {
                 slotStatusStrip
             }
 
-            if editMode {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 10) {
-                    Button {
-                        capture.deleteSelected()
-                    } label: {
-                        Label("Delete Slot", systemImage: "trash")
-                    }
-
-                    Button {
-                        capture.addSlot()
-                    } label: {
-                        Label("Add Slot", systemImage: "plus")
-                    }
-
-                    Button {
-                        capture.removeSelectedSlot()
-                    } label: {
-                        Label("Remove Slot", systemImage: "minus")
-                    }
-
-                    Menu {
-                        ForEach(availableTriggerKeys, id: \.self) { key in
-                            Button(key) {
-                                capture.setTriggerKeyForSelected(key)
-                            }
-                        }
-                    } label: {
-                        Label("Key \(selectedTriggerKey)", systemImage: "keyboard")
-                    }
-
-                    Picker("Shape", selection: Binding(
-                        get: { selectedShape },
-                        set: { capture.setShapeForSelected($0) }
-                    )) {
-                        ForEach(LoopSlotShape.allCases) { shape in
-                            Text(shape.rawValue).tag(shape)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 170)
-                    }
-
-                    HStack(spacing: 12) {
-                    HStack(spacing: 7) {
-                        Text("Live Size")
-                            .font(.system(size: 11, weight: .medium))
-                        Slider(value: $canvasScale, in: 0.65...1.35)
-                            .frame(width: 160)
-                    }
-
-                    HStack(spacing: 7) {
-                        Text("Live Zoom")
-                            .font(.system(size: 11, weight: .medium))
-                        Slider(value: $livePreviewZoom, in: 1...2.5)
-                            .frame(width: 160)
-                    }
-
-                    HStack(spacing: 7) {
-                        Text("Size")
-                            .font(.system(size: 11, weight: .medium))
-                        Slider(
-                            value: Binding(
-                                get: { selectedScale },
-                                set: { capture.setScaleForSelected($0) }
-                            ),
-                            in: 0.5...2.2
-                        )
-                        .frame(width: 160)
-                    }
-                    }
-
-                    HStack(spacing: 12) {
-                        Picker("Live Shape", selection: $livePreviewShape) {
-                            ForEach(LoopSlotShape.allCases) { shape in
-                                Text(shape.rawValue).tag(shape)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 260)
-
-                        Text("Drag slot rings on the stage.")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.6))
-                    }
-                }
-            }
         }
         .buttonStyle(.bordered)
         .controlSize(.regular)
@@ -330,6 +242,156 @@ struct StageView: View {
             .foregroundStyle(.white.opacity(0.65))
         }
         .frame(width: 150)
+    }
+
+    private var layoutPresetControls: some View {
+        HStack(spacing: 6) {
+            TextField("Layout", text: $layoutName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 104)
+
+            Button {
+                saveLayout()
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+            }
+            .help("Save named layout")
+
+            Menu {
+                if savedLayoutNames.isEmpty {
+                    Text("No Saved Layouts")
+                } else {
+                    ForEach(savedLayoutNames, id: \.self) { name in
+                        Button(name) {
+                            loadLayout(named: name)
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "folder")
+            }
+            .help("Load named layout")
+        }
+    }
+
+    private var editControlsOverlay: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Button {
+                    capture.deleteSelected()
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .help("Delete selected loop recording")
+
+                Button {
+                    capture.addSlot()
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .help("Add slot")
+
+                Button {
+                    capture.removeSelectedSlot()
+                } label: {
+                    Image(systemName: "minus")
+                }
+                .help("Remove selected slot")
+
+                keyMenu
+                shapeMenu(title: "Loop", selection: Binding(
+                    get: { selectedShape },
+                    set: { capture.setShapeForSelected($0) }
+                ))
+                shapeMenu(title: "Live", selection: $livePreviewShape)
+            }
+
+            compactSlider("Live Size", value: $canvasScale, range: 0.65...1.35)
+            compactSlider("Live Zoom", value: $livePreviewZoom, range: 1...2.5)
+            compactSlider(
+                "Loop Size",
+                value: Binding(
+                    get: { selectedScale },
+                    set: { capture.setScaleForSelected($0) }
+                ),
+                range: 0.5...2.2
+            )
+        }
+        .font(.system(size: 12, weight: .medium))
+        .padding(10)
+        .frame(width: 330, alignment: .leading)
+        .background(.black.opacity(0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(.white.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    private var keyMenu: some View {
+        Menu {
+            Section("Numbers") {
+                ForEach(["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"], id: \.self) { key in
+                    keyMenuButton(key)
+                }
+            }
+            Section("Symbols") {
+                ForEach(["-", "+"], id: \.self) { key in
+                    keyMenuButton(key)
+                }
+            }
+            Section("Letters") {
+                ForEach(["q", "w", "e", "r", "t", "y"], id: \.self) { key in
+                    keyMenuButton(key)
+                }
+            }
+        } label: {
+            Label(selectedTriggerKey.uppercased(), systemImage: "keyboard")
+        }
+        .frame(width: 72)
+    }
+
+    private func keyMenuButton(_ key: String) -> some View {
+        Button {
+            capture.setTriggerKeyForSelected(key)
+        } label: {
+            if selectedTriggerKey == key {
+                Label(key.uppercased(), systemImage: "checkmark")
+            } else {
+                Text(key.uppercased())
+            }
+        }
+    }
+
+    private func shapeMenu(title: String, selection: Binding<LoopSlotShape>) -> some View {
+        Menu {
+            ForEach(LoopSlotShape.allCases) { shape in
+                Button {
+                    selection.wrappedValue = shape
+                } label: {
+                    if selection.wrappedValue == shape {
+                        Label(shape.rawValue, systemImage: "checkmark")
+                    } else {
+                        Text(shape.rawValue)
+                    }
+                }
+            }
+        } label: {
+            Label(title, systemImage: "viewfinder")
+        }
+        .frame(width: 82)
+    }
+
+    private func compactSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
+        HStack(spacing: 7) {
+            Text(title)
+                .frame(width: 68, alignment: .leading)
+            Slider(value: value, in: range)
+            Text(String(format: "%.2f", value.wrappedValue))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.7))
+                .frame(width: 34, alignment: .trailing)
+        }
     }
 
     private var selectedScale: Double {
@@ -369,11 +431,8 @@ struct StageView: View {
         return slot.triggerKey
     }
 
-    private var availableTriggerKeys: [String] {
-        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "+", "q", "w", "e", "r", "t", "y"]
-    }
-
     private func saveLayout() {
+        let name = normalizedLayoutName(layoutName)
         let preset = LayoutPreset(
             selectedVideoDeviceID: capture.selectedDeviceID,
             selectedAudioDeviceIDs: Array(capture.selectedAudioDeviceIDs),
@@ -391,17 +450,20 @@ struct StageView: View {
 
         do {
             let data = try JSONEncoder().encode(preset)
-            try data.write(to: LayoutPresetStore.defaultURL, options: .atomic)
-            capture.status = "Saved layout."
+            try data.write(to: LayoutPresetStore.url(for: name), options: .atomic)
+            layoutName = name
+            refreshSavedLayouts()
+            capture.status = "Saved layout: \(name)."
         } catch {
             capture.status = "Could not save layout: \(error.localizedDescription)"
         }
     }
 
-    private func loadLayout() {
+    private func loadLayout(named name: String) {
         do {
-            let data = try Data(contentsOf: LayoutPresetStore.defaultURL)
+            let data = try Data(contentsOf: LayoutPresetStore.url(for: name))
             let preset = try JSONDecoder().decode(LayoutPreset.self, from: data)
+            layoutName = name
             layout = preset.stageLayout
             canvasScale = preset.canvasScale
             livePreviewZoom = preset.livePreviewZoom ?? 1
@@ -421,10 +483,19 @@ struct StageView: View {
             } else {
                 output.selectSystemOutput()
             }
-            capture.status = "Loaded layout."
+            capture.status = "Loaded layout: \(name)."
         } catch {
             capture.status = "Could not load layout: \(error.localizedDescription)"
         }
+    }
+
+    private func refreshSavedLayouts() {
+        savedLayoutNames = LayoutPresetStore.savedNames()
+    }
+
+    private func normalizedLayoutName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Default" : trimmed
     }
 
     private var audioMenuTitle: String {
@@ -487,29 +558,32 @@ struct StageView: View {
     }
 
     private var slotStatusStrip: some View {
-        HStack(spacing: 4) {
-            ForEach(capture.slots) { slot in
-                Button {
-                    capture.handleSlot(slot.index)
-                } label: {
-                    Text(slot.triggerKey.uppercased())
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundStyle(slotTextColor(slot))
-                        .frame(width: 22, height: 18)
-                        .background(slotFillColor(slot))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(
-                                    capture.selectedSlotIndex == slot.index ? Color.blue : Color.white.opacity(0.18),
-                                    lineWidth: capture.selectedSlotIndex == slot.index ? 2 : 1
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                ForEach(capture.slots) { slot in
+                    Button {
+                        capture.handleSlot(slot.index)
+                    } label: {
+                        Text(slot.triggerKey.uppercased())
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(slotTextColor(slot))
+                            .frame(width: 22, height: 18)
+                            .background(slotFillColor(slot))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(
+                                        capture.selectedSlotIndex == slot.index ? Color.blue : Color.white.opacity(0.18),
+                                        lineWidth: capture.selectedSlotIndex == slot.index ? 2 : 1
+                                    )
                                 )
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Slot \(slot.index): \(slot.triggerKey.uppercased())")
                 }
-                .buttonStyle(.plain)
-                .help("Slot \(slot.index): \(slot.triggerKey.uppercased())")
             }
         }
+        .frame(height: 22)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

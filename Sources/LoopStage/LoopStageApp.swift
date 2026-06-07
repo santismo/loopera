@@ -10,7 +10,6 @@ struct LoopStageApp: App {
             StageView()
                 .frame(minWidth: 980, minHeight: 680)
         }
-        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
