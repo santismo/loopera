@@ -53,6 +53,9 @@ final class AudioLoopEngine {
     private var requestedStop = false
     var performanceOutputHandler: ((InputBuffer, Double, CMTime) -> Void)?
     private var renderSamplePosition: Int64 = 0
+    private var crossfadeMilliseconds: Double = 45
+    private var fadeOutMilliseconds: Double = 180
+    private var fadeMode: LoopFadeMode = .toLoopEnd
 
     init() {
         configureEngine()
@@ -62,6 +65,14 @@ final class AudioLoopEngine {
         if !engine.isRunning {
             try? engine.start()
         }
+    }
+
+    func apply(profile: OffsetProfile) {
+        lock.lock()
+        crossfadeMilliseconds = max(0, profile.crossfadeMilliseconds)
+        fadeOutMilliseconds = max(1, profile.loopFadeOutMilliseconds)
+        fadeMode = profile.loopFadeMode
+        lock.unlock()
     }
 
     func armThreshold(slot: Int, preBufferMilliseconds: Double) {
@@ -160,7 +171,15 @@ final class AudioLoopEngine {
                 loop.stopFadeTotal = 0
             } else if loop.isPlaying {
                 let length = min(loop.left.count, loop.right.count)
-                let remaining = length > 0 ? length - (loop.playPosition % length) : 0
+                let remaining: Int
+                switch fadeMode {
+                case .fast:
+                    remaining = Int(sampleRate * 0.08)
+                case .slow:
+                    remaining = Int(sampleRate * fadeOutMilliseconds / 1000)
+                case .toLoopEnd:
+                    remaining = length > 0 ? length - (loop.playPosition % length) : 0
+                }
                 let fade = max(1, remaining)
                 loop.stopFadeRemaining = fade
                 loop.stopFadeTotal = fade
@@ -388,7 +407,7 @@ final class AudioLoopEngine {
 
     private func crossfadeSampleCount(for sampleCount: Int) -> Int {
         guard sampleCount > 64 else { return 0 }
-        return min(sampleCount / 2, max(8, Int(sampleRate * 0.045)))
+        return min(sampleCount / 2, max(8, Int(sampleRate * crossfadeMilliseconds / 1000)))
     }
 
 }

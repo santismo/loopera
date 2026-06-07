@@ -6,6 +6,7 @@ struct StageView: View {
     @StateObject private var output = AudioOutputController()
     @StateObject private var performance = PerformanceRecorder()
     @StateObject private var playbackClock = LoopPlaybackClock()
+    @StateObject private var metronome = MetronomeController()
     @State private var layout: StageLayout = .clock
     @State private var editMode = false
     @State private var canvasScale = 1.0
@@ -15,6 +16,8 @@ struct StageView: View {
     @State private var layoutName = "Default"
     @State private var savedLayoutNames: [String] = []
     @State private var stageCaptureView: NSView?
+    @State private var showOffsetSettings = false
+    @State private var offsetDraft = OffsetProfile()
     @FocusState private var layoutNameFocused: Bool
 
     var body: some View {
@@ -56,10 +59,23 @@ struct StageView: View {
         }
         .onAppear {
             refreshSavedLayouts()
+            offsetDraft = capture.offsetProfile
+            metronome.bpm = capture.tempoBPM ?? 120
             capture.performanceAudioHandler = { input, sampleRate, presentationTime in
                 performance.appendLiveAudio(input: input, sampleRate: sampleRate, presentationTime: presentationTime)
             }
             capture.requestAccessAndStart()
+        }
+        .sheet(isPresented: $showOffsetSettings) {
+            OffsetSettingsView(
+                profile: $offsetDraft,
+                apply: { profile in
+                    capture.applyOffsetProfile(profile)
+                },
+                save: { profile in
+                    capture.saveOffsetProfile(profile)
+                }
+            )
         }
         .onChange(of: editMode) { _, isEditing in
             if isEditing, capture.selectedSlotIndex == nil {
@@ -181,16 +197,46 @@ struct StageView: View {
                 HStack(spacing: 7) {
                     Text("BPM")
                         .font(.system(size: 11, weight: .medium))
-                    TextField("BPM", text: bpmText)
+                    TextField("BPM", value: $metronome.bpm, format: .number)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 54)
+                        .onSubmit {
+                            metronome.applyTempo()
+                            capture.tempoBPM = metronome.bpm
+                        }
+                    Button {
+                        metronome.applyTempo()
+                        capture.tempoBPM = metronome.bpm
+                        metronome.togglePlay()
+                    } label: {
+                        Image(systemName: metronome.isPlaying ? "stop.fill" : "play.fill")
+                    }
+                    .help("Play metronome")
+                    Button {
+                        metronome.toggleMute()
+                    } label: {
+                        Image(systemName: metronome.isMuted ? "speaker.slash" : "speaker.wave.2")
+                    }
+                    .help("Mute metronome (K)")
                     Button {
                         capture.detectTempoFromMaster()
+                        if let tempo = capture.tempoBPM {
+                            metronome.bpm = tempo
+                            metronome.applyTempo()
+                        }
                     } label: {
                         Image(systemName: "metronome")
                     }
                     .help("Detect tempo from master loop")
                 }
+
+                Button {
+                    offsetDraft = capture.offsetProfile
+                    showOffsetSettings = true
+                } label: {
+                    Label("Offset", systemImage: "slider.horizontal.2.square")
+                }
+                .help("Audio/video offset and fade settings")
 
                 Toggle(isOn: $editMode) {
                     Label("Edit", systemImage: "slider.horizontal.3")
@@ -577,6 +623,14 @@ struct StageView: View {
         return device.name
     }
 
+    private var selectedAudioDeviceName: String {
+        capture.audioDevices.first(where: { capture.selectedAudioDeviceIDs.contains($0.uniqueID) })?.localizedName ?? "No Audio Input"
+    }
+
+    private var selectedVideoDeviceName: String {
+        capture.videoDevices.first(where: { $0.uniqueID == capture.selectedDeviceID })?.localizedName ?? "No Camera"
+    }
+
     private func audioPairTitle(_ start: Int) -> String {
         "USB \(start + 1)/\(start + 2)"
     }
@@ -715,7 +769,8 @@ struct StageView: View {
                     audioOutputDeviceID: output.selectedDeviceID,
                     playbackClock: playbackClock,
                     syncTime: capture.loopPlaybackTimes[slot.index] ?? 0,
-                    syncTimeUpdatedAt: capture.loopPlaybackTimeUpdatedAt
+                    syncTimeUpdatedAt: capture.loopPlaybackTimeUpdatedAt,
+                    offsetProfile: capture.offsetProfile
                 )
                 .frame(
                     width: tileSize(in: size) * slot.scale,
@@ -772,6 +827,11 @@ struct StageView: View {
             return .handled
         }
 
+        if press.characters.lowercased() == "k" {
+            metronome.toggleMute()
+            return .handled
+        }
+
         if press.characters.lowercased() == "m" {
             capture.toggleMuteSelected()
             return .handled
@@ -816,6 +876,10 @@ struct StageView: View {
         }
 
         let characters = (event.characters ?? event.charactersIgnoringModifiers ?? "").lowercased()
+        if characters == "k" {
+            metronome.toggleMute()
+            return true
+        }
         if characters == "m" {
             capture.toggleMuteSelected()
             return true
@@ -926,6 +990,7 @@ private struct LoopTile: View {
     @ObservedObject var playbackClock: LoopPlaybackClock
     let syncTime: TimeInterval
     let syncTimeUpdatedAt: Date
+    let offsetProfile: OffsetProfile
 
     var body: some View {
         ZStack {
@@ -967,6 +1032,18 @@ private struct LoopTile: View {
         guard slot.state == .recorded else { return 1 }
         guard slot.isPlaying else { return 0 }
         guard slot.isStopping, slot.duration > 0 else { return 1 }
+        if offsetProfile.loopFadeMode != .toLoopEnd, let startedAt = slot.stoppingStartedAt {
+            let fadeDuration: TimeInterval
+            switch offsetProfile.loopFadeMode {
+            case .fast:
+                fadeDuration = 0.08
+            case .slow:
+                fadeDuration = max(0.01, offsetProfile.loopFadeOutMilliseconds / 1000)
+            case .toLoopEnd:
+                fadeDuration = slot.duration
+            }
+            return max(0, min(1, 1 - Date().timeIntervalSince(startedAt) / fadeDuration))
+        }
         let phase = (syncTime + Date().timeIntervalSince(syncTimeUpdatedAt))
             .truncatingRemainder(dividingBy: slot.duration)
         let remaining = max(0, slot.duration - phase)

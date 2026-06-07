@@ -20,6 +20,7 @@ struct LoopSlot: Identifiable, Equatable {
     var isMuted = false
     var isPlaying = true
     var isStopping = false
+    var stoppingStartedAt: Date?
     var customPosition: CGPointUnit?
     var scale: Double = 1
     var shape: LoopSlotShape = .circle

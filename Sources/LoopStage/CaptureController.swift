@@ -21,6 +21,7 @@ final class CaptureController: NSObject, ObservableObject {
     @Published var tempoBPM: Double?
     @Published var selectedSlotIndex: Int?
     @Published var crossfadeMilliseconds: Double = 35
+    @Published var offsetProfile = OffsetProfile()
     @Published private(set) var loopPlaybackTimes: [Int: TimeInterval] = [:]
     @Published private(set) var loopPlaybackTimeUpdatedAt = Date()
     @Published private(set) var videoFormatStatus = ""
@@ -73,6 +74,8 @@ final class CaptureController: NSObject, ObservableObject {
         selectedAudioChannelPairStart = max(0, savedPair - (savedPair % 2))
         audioChannelPairStartForCapture = selectedAudioChannelPairStart
         audioMeterOutput.setSampleBufferDelegate(self, queue: audioMeterQueue)
+        offsetProfile = OffsetProfileStore.load(audioDeviceID: selectedAudioDeviceIDs.first, videoDeviceID: selectedDeviceID)
+        audioLoopEngine.apply(profile: offsetProfile)
         audioLoopEngine.start()
     }
 
@@ -232,12 +235,14 @@ final class CaptureController: NSObject, ObservableObject {
         if slots[slotPosition].isPlaying {
             guard !slots[slotPosition].isStopping else { return }
             slots[slotPosition].isStopping = true
+            slots[slotPosition].stoppingStartedAt = Date()
             previousStoppingPhases[selectedSlotIndex] = audioLoopEngine.phase(slot: selectedSlotIndex)
             audioLoopEngine.setPlaying(slot: selectedSlotIndex, isPlaying: false)
             status = "Slot \(selectedSlotIndex) fading to loop start."
         } else {
             slots[slotPosition].isPlaying = true
             slots[slotPosition].isStopping = false
+            slots[slotPosition].stoppingStartedAt = nil
             previousStoppingPhases[selectedSlotIndex] = nil
             audioLoopEngine.setPlaying(slot: selectedSlotIndex, isPlaying: true)
             loopPlaybackTimes[selectedSlotIndex] = 0
@@ -266,6 +271,19 @@ final class CaptureController: NSObject, ObservableObject {
         audioLoopEngine.performanceOutputHandler = handler
     }
 
+    func applyOffsetProfile(_ profile: OffsetProfile) {
+        offsetProfile = profile
+        crossfadeMilliseconds = profile.crossfadeMilliseconds
+        audioLoopEngine.apply(profile: profile)
+        status = "Offset settings applied."
+    }
+
+    func saveOffsetProfile(_ profile: OffsetProfile) {
+        applyOffsetProfile(profile)
+        OffsetProfileStore.save(profile, audioDeviceID: selectedAudioDeviceIDs.first, videoDeviceID: selectedDeviceID)
+        status = "Offset settings saved for current devices."
+    }
+
     func deleteSelected() {
         guard let selectedSlotIndex else { return }
         clearSlot(selectedSlotIndex)
@@ -281,6 +299,7 @@ final class CaptureController: NSObject, ObservableObject {
         slots[slotPosition].isMuted = false
         slots[slotPosition].isPlaying = true
         slots[slotPosition].isStopping = false
+        slots[slotPosition].stoppingStartedAt = nil
         audioLoopEngine.clear(slot: number)
         loopPlaybackTimes[number] = nil
         previousStoppingPhases[number] = nil
@@ -297,6 +316,7 @@ final class CaptureController: NSObject, ObservableObject {
             slots[index].isMuted = false
             slots[index].isPlaying = true
             slots[index].isStopping = false
+            slots[index].stoppingStartedAt = nil
         }
         selectedSlotIndex = nil
         loopPlaybackTimes.removeAll()
@@ -316,10 +336,13 @@ final class CaptureController: NSObject, ObservableObject {
         for index in recordedIndices {
             slots[index].isPlaying = shouldPlay
             slots[index].isStopping = false
+            slots[index].stoppingStartedAt = nil
             if shouldPlay {
                 audioLoopEngine.restart(slot: slots[index].index)
                 loopPlaybackTimes[slots[index].index] = 0
             } else {
+                slots[index].isStopping = true
+                slots[index].stoppingStartedAt = Date()
                 audioLoopEngine.setPlaying(slot: slots[index].index, isPlaying: false)
                 previousStoppingPhases[slots[index].index] = audioLoopEngine.phase(slot: slots[index].index)
             }
@@ -583,7 +606,10 @@ final class CaptureController: NSObject, ObservableObject {
         stopTask?.cancel()
         stopTask = nil
         if let recordingSlotIndex {
-            let trimEndSeconds = pendingStopTrimEndSeconds
+            var trimEndSeconds = pendingStopTrimEndSeconds
+            if recordingSlotIndex == 1 {
+                trimEndSeconds = max(0, trimEndSeconds + offsetProfile.audioStopOffsetMilliseconds / 1000)
+            }
             let duration = audioLoopEngine.finishRecording(slot: recordingSlotIndex, trimEndSeconds: trimEndSeconds)
             completedAudioDurations[recordingSlotIndex] = duration
             completedVideoEndTrims[recordingSlotIndex] = trimEndSeconds
@@ -781,6 +807,7 @@ final class CaptureController: NSObject, ObservableObject {
             let slotIndex = slots[index].index
             guard let phase = audioLoopEngine.phase(slot: slotIndex) else {
                 slots[index].isStopping = false
+                slots[index].stoppingStartedAt = nil
                 slots[index].isPlaying = false
                 previousStoppingPhases[slotIndex] = nil
                 loopPlaybackTimes[slotIndex] = 0
@@ -790,6 +817,7 @@ final class CaptureController: NSObject, ObservableObject {
             let previous = previousStoppingPhases[slotIndex] ?? phase
             if previous > 0.85 && phase < 0.15 {
                 slots[index].isStopping = false
+                slots[index].stoppingStartedAt = nil
                 slots[index].isPlaying = false
                 previousStoppingPhases[slotIndex] = nil
                 loopPlaybackTimes[slotIndex] = 0
@@ -842,10 +870,11 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
             let endTrim = completedVideoEndTrims[recordingSlotIndex] ?? 0
             let startOffset: TimeInterval
             if recordingSlotIndex == 1 {
-                startOffset = await detectedMediaAudioStartOffset(for: outputFileURL) ?? loopStartOffset()
+                startOffset = applyVideoOffset(await detectedMediaAudioStartOffset(for: outputFileURL) ?? loopStartOffset())
             } else {
-                startOffset = recordingStartOffset()
+                startOffset = applyVideoOffset(recordingStartOffset()
                     ?? videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
+                )
             }
             slots[slotPosition].url = outputFileURL
             slots[slotPosition].createdAt = Date()
@@ -854,6 +883,7 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
             slots[slotPosition].state = .recorded
             slots[slotPosition].isPlaying = true
             slots[slotPosition].isStopping = false
+            slots[slotPosition].stoppingStartedAt = nil
             slots[slotPosition].isMuted = false
             if let phase = audioLoopEngine.phase(slot: recordingSlotIndex) {
                 loopPlaybackTimes[recordingSlotIndex] = phase * slots[slotPosition].duration
@@ -887,6 +917,10 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
         }
         let multiple = max(1, Int((duration / masterDuration).rounded()))
         return Double(multiple) * masterDuration
+    }
+
+    private func applyVideoOffset(_ offset: TimeInterval) -> TimeInterval {
+        max(0, offset + offsetProfile.videoStartOffsetMilliseconds / 1000)
     }
 
     private func detectedMediaAudioStartOffset(for url: URL) async -> TimeInterval? {
