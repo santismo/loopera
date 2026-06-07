@@ -1,0 +1,996 @@
+import AppKit
+import SwiftUI
+
+struct StageView: View {
+    @StateObject private var capture = CaptureController()
+    @StateObject private var output = AudioOutputController()
+    @StateObject private var performance = PerformanceRecorder()
+    @StateObject private var playbackClock = LoopPlaybackClock()
+    @State private var layout: StageLayout = .clock
+    @State private var editMode = false
+    @State private var canvasScale = 1.0
+    @State private var dragPositions: [UUID: CGPointUnit] = [:]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            toolbar
+
+            GeometryReader { proxy in
+                ZStack {
+                    Color(red: 0.045, green: 0.048, blue: 0.052)
+
+                    CameraPreview(session: capture.session)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .scaleEffect(canvasScale)
+                        .padding(stagePadding(for: proxy.size))
+
+                    loopLayer(in: proxy.size)
+                }
+                .coordinateSpace(name: "stage")
+            }
+        }
+        .background(Color(red: 0.10, green: 0.105, blue: 0.11))
+        .background(KeyEventMonitor { event in
+            handleEvent(event)
+        })
+        .foregroundStyle(.white)
+        .focusable()
+        .onKeyPress { press in
+            handleKeyPress(press)
+        }
+        .onDeleteCommand {
+            capture.deleteSelected()
+        }
+        .onAppear {
+            capture.requestAccessAndStart()
+        }
+        .onChange(of: editMode) { _, isEditing in
+            if isEditing, capture.selectedSlotIndex == nil {
+                capture.selectedSlotIndex = 1
+            }
+            capture.status = isEditing ? "Edit mode: drag slot rings and resize selected loop." : "Edit mode off."
+        }
+    }
+
+    private var toolbar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Text("🎥")
+                    .font(.system(size: 22))
+                    .frame(width: 34)
+
+                Button {
+                    capture.refreshDevices()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh camera and audio inputs")
+
+                Picker("Camera", selection: Binding(
+                    get: { capture.selectedDeviceID },
+                    set: { capture.selectDevice($0) }
+                )) {
+                    ForEach(capture.videoDevices, id: \.uniqueID) { device in
+                        Text(device.localizedName).tag(device.uniqueID)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 180)
+
+                Menu {
+                    ForEach(capture.audioDevices, id: \.uniqueID) { device in
+                        Toggle(device.localizedName, isOn: Binding(
+                            get: { capture.selectedAudioDeviceIDs.contains(device.uniqueID) },
+                            set: { capture.setAudioDevice(device.uniqueID, enabled: $0) }
+                        ))
+                    }
+                } label: {
+                    Label(audioMenuTitle, systemImage: "waveform")
+                }
+                .frame(width: 180)
+
+                Menu {
+                    ForEach(capture.audioChannelPairStarts, id: \.self) { start in
+                        Button {
+                            capture.selectAudioChannelPair(start: start)
+                        } label: {
+                            if capture.selectedAudioChannelPairStart == start {
+                                Label(audioPairTitle(start), systemImage: "checkmark")
+                            } else {
+                                Text(audioPairTitle(start))
+                            }
+                        }
+                    }
+                } label: {
+                    Label(audioPairTitle(capture.selectedAudioChannelPairStart), systemImage: "cable.connector")
+                }
+                .frame(width: 118)
+
+                Menu {
+                    Button("System Output") {
+                        output.selectSystemOutput()
+                    }
+                    Divider()
+                    ForEach(output.devices) { device in
+                        Button {
+                            output.select(device.id)
+                        } label: {
+                            if output.selectedDeviceID == device.id {
+                                Label(device.name, systemImage: "checkmark")
+                            } else {
+                                Text(device.name)
+                            }
+                        }
+                    }
+                    Divider()
+                    Button {
+                        output.refresh()
+                    } label: {
+                        Label("Refresh Outputs", systemImage: "arrow.clockwise")
+                    }
+                } label: {
+                    Label(audioOutputMenuTitle, systemImage: "speaker.wave.2")
+                }
+                .frame(width: 180)
+
+                Picker("Layout", selection: $layout) {
+                    ForEach(StageLayout.allCases) { layout in
+                        Text(layout.rawValue).tag(layout)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 190)
+            }
+
+            HStack(spacing: 10) {
+                meter
+
+                HStack(spacing: 7) {
+                    Text("Thr")
+                        .font(.system(size: 11, weight: .medium))
+                    Slider(value: $capture.threshold, in: 0.0005...0.2)
+                        .frame(width: 130)
+                }
+
+                HStack(spacing: 7) {
+                    Text("BPM")
+                        .font(.system(size: 11, weight: .medium))
+                    TextField("BPM", text: bpmText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 54)
+                    Button {
+                        capture.detectTempoFromMaster()
+                    } label: {
+                        Image(systemName: "metronome")
+                    }
+                    .help("Detect tempo from master loop")
+                }
+
+                Toggle(isOn: $editMode) {
+                    Label("Edit", systemImage: "slider.horizontal.3")
+                }
+                .toggleStyle(.button)
+
+                Button {
+                    capture.clearLoops()
+                } label: {
+                    Label("Clear", systemImage: "trash")
+                }
+                .disabled(editMode)
+
+                Button {
+                    saveLayout()
+                } label: {
+                    Label("Save Layout", systemImage: "square.and.arrow.down")
+                }
+
+                Button {
+                    loadLayout()
+                } label: {
+                    Label("Load Layout", systemImage: "square.and.arrow.up")
+                }
+
+                Button {
+                    if performance.isRecording {
+                        Task { await performance.stop() }
+                    } else {
+                        performance.start()
+                    }
+                } label: {
+                    Label(performance.isRecording ? "End Program" : "Record Program", systemImage: "rectangle.dashed.badge.record")
+                }
+                .disabled(editMode)
+
+                Text(capture.status)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.66))
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            HStack(spacing: 10) {
+                masterProgressBar
+                slotStatusStrip
+            }
+
+            if editMode {
+                HStack(spacing: 12) {
+                    Button {
+                        capture.deleteSelected()
+                    } label: {
+                        Label("Delete Slot", systemImage: "trash")
+                    }
+
+                    Button {
+                        capture.addSlot()
+                    } label: {
+                        Label("Add Slot", systemImage: "plus")
+                    }
+
+                    Button {
+                        capture.removeSelectedSlot()
+                    } label: {
+                        Label("Remove Slot", systemImage: "minus")
+                    }
+
+                    Menu {
+                        ForEach(availableTriggerKeys, id: \.self) { key in
+                            Button(key) {
+                                capture.setTriggerKeyForSelected(key)
+                            }
+                        }
+                    } label: {
+                        Label("Key \(selectedTriggerKey)", systemImage: "keyboard")
+                    }
+
+                    Picker("Shape", selection: Binding(
+                        get: { selectedShape },
+                        set: { capture.setShapeForSelected($0) }
+                    )) {
+                        ForEach(LoopSlotShape.allCases) { shape in
+                            Text(shape.rawValue).tag(shape)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 170)
+
+                    HStack(spacing: 7) {
+                        Text("Canvas")
+                            .font(.system(size: 11, weight: .medium))
+                        Slider(value: $canvasScale, in: 0.65...1.35)
+                            .frame(width: 160)
+                    }
+
+                    HStack(spacing: 7) {
+                        Text("Size")
+                            .font(.system(size: 11, weight: .medium))
+                        Slider(
+                            value: Binding(
+                                get: { selectedScale },
+                                set: { capture.setScaleForSelected($0) }
+                            ),
+                            in: 0.5...2.2
+                        )
+                        .frame(width: 160)
+                    }
+
+                    Text("Drag slot rings on the stage.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.black.opacity(0.86))
+    }
+
+    private var meter: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(.white.opacity(0.18))
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(capture.inputLevel >= capture.threshold ? Color.red : Color.green)
+                    .frame(width: max(4, 150 * capture.inputLevel))
+                Rectangle()
+                    .fill(.yellow)
+                    .frame(width: 3)
+                    .offset(x: 150 * capture.threshold)
+            }
+            .frame(width: 150, height: 16)
+            HStack {
+                Text("In")
+                Spacer()
+                Text("\(String(format: "%.1f", capture.inputLevel * 100))% / \(String(format: "%.1f", capture.threshold * 100))%")
+            }
+            .font(.system(size: 9, weight: .medium, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.65))
+        }
+        .frame(width: 150)
+    }
+
+    private var selectedScale: Double {
+        guard let selected = capture.selectedSlotIndex,
+              let slot = capture.slots.first(where: { $0.index == selected }) else {
+            return 1
+        }
+        return slot.scale
+    }
+
+    private var bpmText: Binding<String> {
+        Binding(
+            get: {
+                guard let bpm = capture.tempoBPM else { return "" }
+                return String(Int(bpm.rounded()))
+            },
+            set: { newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                capture.tempoBPM = trimmed.isEmpty ? nil : Double(trimmed)
+            }
+        )
+    }
+
+    private var selectedShape: LoopSlotShape {
+        guard let selected = capture.selectedSlotIndex,
+              let slot = capture.slots.first(where: { $0.index == selected }) else {
+            return .circle
+        }
+        return slot.shape
+    }
+
+    private var selectedTriggerKey: String {
+        guard let selected = capture.selectedSlotIndex,
+              let slot = capture.slots.first(where: { $0.index == selected }) else {
+            return "1"
+        }
+        return slot.triggerKey
+    }
+
+    private var availableTriggerKeys: [String] {
+        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "+", "q", "w", "e", "r", "t", "y"]
+    }
+
+    private func saveLayout() {
+        let preset = LayoutPreset(
+            selectedVideoDeviceID: capture.selectedDeviceID,
+            selectedAudioDeviceIDs: Array(capture.selectedAudioDeviceIDs),
+            selectedAudioChannelPairStart: capture.selectedAudioChannelPairStart,
+            selectedAudioOutputDeviceID: output.selectedDeviceID,
+            stageLayout: layout,
+            canvasScale: canvasScale,
+            threshold: capture.threshold,
+            thresholdLeadMilliseconds: capture.thresholdLeadMilliseconds,
+            tempoBPM: capture.tempoBPM,
+            slots: capture.slotPresets()
+        )
+
+        do {
+            let data = try JSONEncoder().encode(preset)
+            try data.write(to: LayoutPresetStore.defaultURL, options: .atomic)
+            capture.status = "Saved layout."
+        } catch {
+            capture.status = "Could not save layout: \(error.localizedDescription)"
+        }
+    }
+
+    private func loadLayout() {
+        do {
+            let data = try Data(contentsOf: LayoutPresetStore.defaultURL)
+            let preset = try JSONDecoder().decode(LayoutPreset.self, from: data)
+            layout = preset.stageLayout
+            canvasScale = preset.canvasScale
+            capture.threshold = preset.threshold
+            capture.thresholdLeadMilliseconds = preset.thresholdLeadMilliseconds ?? capture.thresholdLeadMilliseconds
+            capture.tempoBPM = preset.tempoBPM
+            capture.applySlotPresets(preset.slots)
+            capture.applyDevicePreset(
+                videoDeviceID: preset.selectedVideoDeviceID,
+                audioDeviceIDs: preset.selectedAudioDeviceIDs,
+                audioChannelPairStart: preset.selectedAudioChannelPairStart
+            )
+            output.refresh()
+            if let outputID = preset.selectedAudioOutputDeviceID {
+                output.select(outputID)
+            } else {
+                output.selectSystemOutput()
+            }
+            capture.status = "Loaded layout."
+        } catch {
+            capture.status = "Could not load layout: \(error.localizedDescription)"
+        }
+    }
+
+    private var audioMenuTitle: String {
+        let selected = capture.audioDevices.filter { capture.selectedAudioDeviceIDs.contains($0.uniqueID) }
+        switch selected.count {
+        case 0:
+            return "No Audio"
+        case 1:
+            return selected[0].localizedName
+        default:
+            return "\(selected.count) Audio Inputs"
+        }
+    }
+
+    private var audioOutputMenuTitle: String {
+        guard let selected = output.selectedDeviceID,
+              let device = output.devices.first(where: { $0.id == selected }) else {
+            return "System Output"
+        }
+        return device.name
+    }
+
+    private func audioPairTitle(_ start: Int) -> String {
+        "USB \(start + 1)/\(start + 2)"
+    }
+
+    private var masterProgressBar: some View {
+        let master = capture.slots.first(where: { $0.index == 1 })
+        let duration = master?.duration ?? 0
+        let syncTime = capture.loopPlaybackTimes[1] ?? 0
+
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text("Master")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.62))
+                Text(master?.state == .recorded ? timeLabel(syncTime, duration: duration) : "--")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { _ in
+                GeometryReader { proxy in
+                    let phase = masterProgressPhase(
+                        syncTime: syncTime,
+                        updatedAt: capture.loopPlaybackTimeUpdatedAt,
+                        duration: duration
+                    )
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(.white.opacity(0.14))
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.green.opacity(0.92))
+                            .frame(width: max(3, proxy.size.width * phase))
+                    }
+                }
+            }
+            .frame(width: 190, height: 8)
+        }
+        .frame(width: 190, alignment: .leading)
+    }
+
+    private var slotStatusStrip: some View {
+        HStack(spacing: 4) {
+            ForEach(capture.slots) { slot in
+                Button {
+                    capture.handleSlot(slot.index)
+                } label: {
+                    Text(slot.triggerKey.uppercased())
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(slotTextColor(slot))
+                        .frame(width: 22, height: 18)
+                        .background(slotFillColor(slot))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(
+                                    capture.selectedSlotIndex == slot.index ? Color.blue : Color.white.opacity(0.18),
+                                    lineWidth: capture.selectedSlotIndex == slot.index ? 2 : 1
+                                )
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.plain)
+                .help("Slot \(slot.index): \(slot.triggerKey.uppercased())")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func masterProgressPhase(syncTime: TimeInterval, updatedAt: Date, duration: TimeInterval) -> Double {
+        guard duration > 0 else { return 0 }
+        let time = syncTime + Date().timeIntervalSince(updatedAt)
+        return max(0, min(1, time.truncatingRemainder(dividingBy: duration) / duration))
+    }
+
+    private func timeLabel(_ syncTime: TimeInterval, duration: TimeInterval) -> String {
+        guard duration > 0 else { return "--" }
+        let time = syncTime.truncatingRemainder(dividingBy: duration)
+        return String(format: "%.1f/%.1f", time, duration)
+    }
+
+    private func slotFillColor(_ slot: LoopSlot) -> Color {
+        switch slot.state {
+        case .empty:
+            return .white.opacity(0.08)
+        case .listening:
+            return .yellow.opacity(0.85)
+        case .armed:
+            return .cyan.opacity(0.82)
+        case .recording:
+            return .red.opacity(0.86)
+        case .recorded:
+            return slot.isMuted ? .gray.opacity(0.62) : .green.opacity(0.84)
+        }
+    }
+
+    private func slotTextColor(_ slot: LoopSlot) -> Color {
+        switch slot.state {
+        case .empty:
+            return .white.opacity(0.54)
+        case .listening, .armed, .recording, .recorded:
+            return .black.opacity(0.88)
+        }
+    }
+
+    @ViewBuilder
+    private func loopLayer(in size: CGSize) -> some View {
+        ForEach(capture.slots) { slot in
+            if slot.state != .empty || editMode {
+                LoopTile(
+                    slot: slot,
+                    isSelected: capture.selectedSlotIndex == slot.index,
+                    editMode: editMode,
+                    audioOutputDeviceID: output.selectedDeviceID,
+                    playbackClock: playbackClock,
+                    syncTime: capture.loopPlaybackTimes[slot.index] ?? 0,
+                    syncTimeUpdatedAt: capture.loopPlaybackTimeUpdatedAt
+                )
+                .frame(
+                    width: tileSize(in: size) * slot.scale,
+                    height: tileSize(in: size) * slot.scale
+                )
+                .position(position(for: slot, in: size))
+                .onTapGesture {
+                    capture.selectedSlotIndex = slot.index
+                }
+                .gesture(editMode ? dragGesture(for: slot, in: size) : nil)
+            }
+        }
+    }
+
+    private func dragGesture(for slot: LoopSlot, in size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named("stage"))
+            .onChanged { value in
+                capture.selectedSlotIndex = slot.index
+                dragPositions[slot.id] = CGPointUnit(
+                    x: min(1, max(0, value.location.x / max(1, size.width))),
+                    y: min(1, max(0, value.location.y / max(1, size.height)))
+                )
+            }
+            .onEnded { value in
+                let position = CGPointUnit(
+                    x: min(1, max(0, value.location.x / max(1, size.width))),
+                    y: min(1, max(0, value.location.y / max(1, size.height)))
+                )
+                capture.setCustomPosition(slot: slot.index, position: position)
+                dragPositions[slot.id] = nil
+            }
+    }
+
+    private func handleKeyPress(_ press: KeyPress) -> KeyPress.Result {
+        if editMode {
+            if press.key == .delete || press.key == .deleteForward {
+                capture.deleteSelected()
+                return .handled
+            }
+            return .ignored
+        }
+
+        if press.key == .space {
+            capture.handleSpace()
+            return .handled
+        }
+
+        if press.key == .delete || press.key == .deleteForward {
+            capture.deleteSelected()
+            return .handled
+        }
+
+        if press.characters.lowercased() == "m" {
+            capture.toggleMuteSelected()
+            return .handled
+        }
+
+        let key = press.characters.lowercased()
+        if !key.isEmpty {
+            capture.handleTriggerKey(key)
+            return .handled
+        }
+
+        return .ignored
+    }
+
+    private func handleEvent(_ event: NSEvent) -> Bool {
+        if NSApp.keyWindow?.firstResponder is NSTextView {
+            return false
+        }
+
+        if editMode {
+            if event.keyCode == 51 || event.keyCode == 117 {
+                capture.deleteSelected()
+                return true
+            }
+            return false
+        }
+
+        switch event.keyCode {
+        case 49:
+            capture.handleSpace()
+            return true
+        case 51, 117:
+            capture.deleteSelected()
+            return true
+        default:
+            break
+        }
+
+        let characters = (event.characters ?? event.charactersIgnoringModifiers ?? "").lowercased()
+        if characters == "m" {
+            capture.toggleMuteSelected()
+            return true
+        }
+        if !characters.isEmpty {
+            capture.handleTriggerKey(characters)
+            return true
+        }
+        return false
+    }
+
+    private func stagePadding(for size: CGSize) -> CGFloat {
+        switch layout {
+        case .clock:
+            min(size.width, size.height) * 0.18
+        case .border:
+            min(size.width, size.height) * 0.16
+        case .grid:
+            24
+        }
+    }
+
+    private func tileSize(in size: CGSize) -> CGFloat {
+        switch layout {
+        case .clock:
+            max(62, min(size.width, size.height) * 0.145)
+        case .border:
+            max(62, min(size.width, size.height) * 0.135)
+        case .grid:
+            max(84, min(size.width, size.height) * 0.18)
+        }
+    }
+
+    private func position(for slot: LoopSlot, in size: CGSize) -> CGPoint {
+        if let dragPosition = dragPositions[slot.id] {
+            return CGPoint(x: dragPosition.x * size.width, y: dragPosition.y * size.height)
+        }
+
+        if let customPosition = slot.customPosition {
+            return CGPoint(x: customPosition.x * size.width, y: customPosition.y * size.height)
+        }
+
+        let index = slot.index - 1
+        switch layout {
+        case .clock:
+            let radius = min(size.width, size.height) * 0.39
+            let angle = (Double(index) / Double(max(1, capture.slots.count))) * 2 * Double.pi - Double.pi / 2
+            return CGPoint(
+                x: size.width / 2 + cos(angle) * radius,
+                y: size.height / 2 + sin(angle) * radius
+            )
+        case .border:
+            return borderPosition(for: index, in: size)
+        case .grid:
+            let tile = tileSize(in: size)
+            let columns = 4
+            let spacing = tile + 12
+            let row = index / columns
+            let column = index % columns
+            let totalWidth = CGFloat(columns - 1) * spacing
+            return CGPoint(
+                x: size.width / 2 - totalWidth / 2 + CGFloat(column) * spacing,
+                y: size.height - 75 - CGFloat(row) * spacing
+            )
+        }
+    }
+
+    private func borderPosition(for index: Int, in size: CGSize) -> CGPoint {
+        let inset = tileSize(in: size) / 2 + 16
+        let points = [
+            CGPoint(x: size.width * 0.25, y: inset),
+            CGPoint(x: size.width * 0.5, y: inset),
+            CGPoint(x: size.width * 0.75, y: inset),
+            CGPoint(x: size.width - inset, y: size.height * 0.25),
+            CGPoint(x: size.width - inset, y: size.height * 0.5),
+            CGPoint(x: size.width - inset, y: size.height * 0.75),
+            CGPoint(x: size.width * 0.75, y: size.height - inset),
+            CGPoint(x: size.width * 0.5, y: size.height - inset),
+            CGPoint(x: size.width * 0.25, y: size.height - inset),
+            CGPoint(x: inset, y: size.height * 0.75),
+            CGPoint(x: inset, y: size.height * 0.5),
+            CGPoint(x: inset, y: size.height * 0.25)
+        ]
+        return points[index % points.count]
+    }
+}
+
+private struct LoopTile: View {
+    let slot: LoopSlot
+    let isSelected: Bool
+    let editMode: Bool
+    let audioOutputDeviceID: String?
+    @ObservedObject var playbackClock: LoopPlaybackClock
+    let syncTime: TimeInterval
+    let syncTimeUpdatedAt: Date
+
+    var body: some View {
+        ZStack {
+            if let url = slot.url, slot.state == .recorded, !editMode {
+                LoopPlayerView(
+                    url: url,
+                    slotID: slot.id,
+                    startOffset: slot.startOffset,
+                    duration: slot.duration,
+                    isMuted: true,
+                    isPlaying: slot.isPlaying,
+                    audioOutputDeviceID: audioOutputDeviceID,
+                    playbackClock: playbackClock,
+                    syncTime: syncTime
+                )
+                    .clipShape(tileShape)
+                    .shadow(color: .black.opacity(editMode ? 0 : 0.45), radius: editMode ? 0 : 16, y: editMode ? 0 : 8)
+            } else {
+                tileShape
+                    .fill(editMode ? .white.opacity(0.045) : .clear)
+            }
+
+            if editMode, let ringColor {
+                tileShape
+                    .stroke(ringColor, lineWidth: 4)
+            }
+
+            if editMode {
+                editLabel
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .opacity(slot.isPlaying || slot.state != .recorded ? 1 : 0.46)
+    }
+
+    private var ringColor: Color? {
+        switch slot.state {
+        case .listening:
+            return .yellow
+        case .armed:
+            return .cyan
+        case .recording:
+            return .red
+        case .recorded:
+            return isSelected ? .blue : nil
+        case .empty:
+            return editMode ? (isSelected ? .blue : .white.opacity(0.28)) : nil
+        }
+    }
+
+    private var progressDot: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { _ in
+            GeometryReader { proxy in
+                if slot.duration > 0, slot.isPlaying {
+                    let interpolatedTime = syncTime + Date().timeIntervalSince(syncTimeUpdatedAt)
+                    let phase = interpolatedTime.truncatingRemainder(dividingBy: slot.duration) / slot.duration
+                    let position = dotPosition(phase: phase, in: proxy.size)
+                    Circle()
+                        .fill(.white)
+                        .frame(width: 8, height: 8)
+                        .position(position)
+                }
+            }
+        }
+    }
+
+    private func dotPosition(phase: Double, in size: CGSize) -> CGPoint {
+        switch slot.shape {
+        case .circle:
+            let radius = min(size.width, size.height) / 2 + 4
+            let angle = phase * 2 * Double.pi - Double.pi / 2
+            return CGPoint(
+                x: size.width / 2 + cos(angle) * radius,
+                y: size.height / 2 + sin(angle) * radius
+            )
+        case .roundedSquare, .capsule:
+            return perimeterPosition(phase: phase, in: size, inset: -5)
+        case .diamond:
+            let points = [
+                CGPoint(x: size.width / 2, y: -5),
+                CGPoint(x: size.width + 5, y: size.height / 2),
+                CGPoint(x: size.width / 2, y: size.height + 5),
+                CGPoint(x: -5, y: size.height / 2)
+            ]
+            return polygonPosition(phase: phase, points: points)
+        case .hexagon:
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let radius = min(size.width, size.height) / 2 + 5
+            let points = (0..<6).map { index in
+                let angle = Double(index) / 6 * 2 * Double.pi - Double.pi / 2
+                return CGPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
+            }
+            return polygonPosition(phase: phase, points: points)
+        }
+    }
+
+    private func perimeterPosition(phase: Double, in size: CGSize, inset: CGFloat) -> CGPoint {
+        let minX = inset
+        let maxX = size.width - inset
+        let minY = inset
+        let maxY = size.height - inset
+        let width = maxX - minX
+        let height = maxY - minY
+        let perimeter = 2 * (width + height)
+        var distance = phase * perimeter
+
+        if distance <= width / 2 {
+            return CGPoint(x: size.width / 2 + distance, y: minY)
+        }
+        distance -= width / 2
+        if distance <= height {
+            return CGPoint(x: maxX, y: minY + distance)
+        }
+        distance -= height
+        if distance <= width {
+            return CGPoint(x: maxX - distance, y: maxY)
+        }
+        distance -= width
+        if distance <= height {
+            return CGPoint(x: minX, y: maxY - distance)
+        }
+        distance -= height
+        return CGPoint(x: minX + distance, y: minY)
+    }
+
+    private func polygonPosition(phase: Double, points: [CGPoint]) -> CGPoint {
+        guard points.count > 1 else { return points.first ?? .zero }
+        let segments = zip(points, points.dropFirst() + [points[0]]).map { start, end in
+            (start: start, end: end, length: hypot(end.x - start.x, end.y - start.y))
+        }
+        let perimeter = segments.reduce(CGFloat(0)) { $0 + $1.length }
+        var distance = CGFloat(phase) * perimeter
+
+        for segment in segments {
+            if distance <= segment.length {
+                let t = segment.length == 0 ? 0 : distance / segment.length
+                return CGPoint(
+                    x: segment.start.x + (segment.end.x - segment.start.x) * t,
+                    y: segment.start.y + (segment.end.y - segment.start.y) * t
+                )
+            }
+            distance -= segment.length
+        }
+        return points[0]
+    }
+
+    private var editLabel: some View {
+        VStack(spacing: 1) {
+            Text(slotDisplayName)
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+            Text(slot.triggerKey)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.78))
+        }
+        .frame(width: 34, height: 34)
+        .background(.black.opacity(0.58))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private var slotDisplayName: String {
+        switch slot.index {
+        case 10:
+            return "0"
+        case 11:
+            return "-"
+        case 12:
+            return "+"
+        default:
+            return "\(slot.index)"
+        }
+    }
+
+    private var tileShape: AnyShape {
+        switch slot.shape {
+        case .circle:
+            AnyShape(Circle())
+        case .roundedSquare:
+            AnyShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        case .capsule:
+            AnyShape(Capsule())
+        case .diamond:
+            AnyShape(DiamondShape())
+        case .hexagon:
+            AnyShape(HexagonShape())
+        }
+    }
+}
+
+private struct DiamondShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.midY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct HexagonShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radius = min(rect.width, rect.height) / 2
+        var path = Path()
+        for index in 0..<6 {
+            let angle = Double(index) / 6 * 2 * Double.pi - Double.pi / 2
+            let point = CGPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
+            if index == 0 {
+                path.move(to: point)
+            } else {
+                path.addLine(to: point)
+            }
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct AnyShape: Shape, @unchecked Sendable {
+    private let pathBuilder: @Sendable (CGRect) -> Path
+
+    init<S: Shape>(_ shape: S) {
+        pathBuilder = { rect in
+            shape.path(in: rect)
+        }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        pathBuilder(rect)
+    }
+}
+
+private struct KeyEventMonitor: NSViewRepresentable {
+    let handler: (NSEvent) -> Bool
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.start(handler: handler)
+        return NSView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.handler = handler
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator {
+        var handler: ((NSEvent) -> Bool)?
+        private var monitor: Any?
+
+        func start(handler: @escaping (NSEvent) -> Bool) {
+            self.handler = handler
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                if self?.handler?(event) == true {
+                    return nil
+                }
+                return event
+            }
+        }
+
+        deinit {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
+    }
+}

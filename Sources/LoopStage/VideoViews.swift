@@ -1,0 +1,236 @@
+@preconcurrency import AVFoundation
+import AVKit
+import SwiftUI
+
+struct CameraPreview: NSViewRepresentable {
+    let session: AVCaptureSession
+
+    func makeNSView(context: Context) -> PreviewView {
+        let view = PreviewView()
+        view.previewLayer.session = session
+        view.previewLayer.videoGravity = .resizeAspectFill
+        return view
+    }
+
+    func updateNSView(_ nsView: PreviewView, context: Context) {
+        nsView.previewLayer.session = session
+    }
+}
+
+final class PreviewView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+    }
+
+    override func makeBackingLayer() -> CALayer {
+        AVCaptureVideoPreviewLayer()
+    }
+
+    var previewLayer: AVCaptureVideoPreviewLayer {
+        layer as! AVCaptureVideoPreviewLayer
+    }
+}
+
+struct LoopPlayerView: NSViewRepresentable {
+    let url: URL
+    let slotID: UUID
+    let startOffset: TimeInterval
+    let duration: TimeInterval
+    let isMuted: Bool
+    let isPlaying: Bool
+    let audioOutputDeviceID: String?
+    let playbackClock: LoopPlaybackClock
+    let syncTime: TimeInterval
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> PlayerHostView {
+        let view = PlayerHostView()
+        context.coordinator.configure(
+            url: url,
+            slotID: slotID,
+            startOffset: startOffset,
+            duration: duration,
+            isMuted: isMuted,
+            isPlaying: isPlaying,
+            audioOutputDeviceID: audioOutputDeviceID,
+            playbackClock: playbackClock,
+            syncTime: syncTime,
+            in: view.playerLayer
+        )
+        return view
+    }
+
+    func updateNSView(_ nsView: PlayerHostView, context: Context) {
+        context.coordinator.configure(
+            url: url,
+            slotID: slotID,
+            startOffset: startOffset,
+            duration: duration,
+            isMuted: isMuted,
+            isPlaying: isPlaying,
+            audioOutputDeviceID: audioOutputDeviceID,
+            playbackClock: playbackClock,
+            syncTime: syncTime,
+            in: nsView.playerLayer
+        )
+    }
+
+    final class Coordinator {
+        private var currentURL: URL?
+        private var currentStartOffset: TimeInterval = -1
+        private var currentDuration: TimeInterval = -1
+        private var player: AVQueuePlayer?
+        private var looper: AVPlayerLooper?
+        private var timeObserver: Any?
+        private var lastSyncSeek = Date.distantPast
+
+        @MainActor
+        func configure(
+            url: URL,
+            slotID: UUID,
+            startOffset: TimeInterval,
+            duration: TimeInterval,
+            isMuted: Bool,
+            isPlaying: Bool,
+            audioOutputDeviceID: String?,
+            playbackClock: LoopPlaybackClock,
+            syncTime: TimeInterval,
+            in layer: AVPlayerLayer
+        ) {
+            if currentURL != url || currentStartOffset != startOffset || currentDuration != duration {
+                if let timeObserver, let player {
+                    player.removeTimeObserver(timeObserver)
+                    self.timeObserver = nil
+                }
+
+                currentURL = url
+                currentStartOffset = startOffset
+                currentDuration = duration
+
+                let item = AVPlayerItem(url: url)
+                item.preferredForwardBufferDuration = 0
+                let queuePlayer = AVQueuePlayer()
+                queuePlayer.actionAtItemEnd = .none
+                queuePlayer.automaticallyWaitsToMinimizeStalling = false
+
+                let start = CMTime(seconds: startOffset, preferredTimescale: 600)
+                if duration > 0 {
+                    let rangeDuration = CMTime(seconds: duration, preferredTimescale: 600)
+                    looper = AVPlayerLooper(
+                        player: queuePlayer,
+                        templateItem: item,
+                        timeRange: CMTimeRange(start: start, duration: rangeDuration)
+                    )
+                } else {
+                    looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
+                }
+                player = queuePlayer
+                layer.player = queuePlayer
+                layer.videoGravity = .resizeAspectFill
+                let initialSeconds = duration > 0 ? syncTime.truncatingRemainder(dividingBy: duration) : 0
+                let initialTime = CMTimeAdd(start, CMTime(seconds: max(0, initialSeconds), preferredTimescale: 600))
+                queuePlayer.seek(to: initialTime, toleranceBefore: .zero, toleranceAfter: .zero)
+                playbackClock.update(slotID: slotID, seconds: max(0, initialSeconds))
+
+                timeObserver = queuePlayer.addPeriodicTimeObserver(
+                    forInterval: CMTime(value: 1, timescale: 30),
+                    queue: .main
+                ) { time in
+                    Task { @MainActor in
+                        playbackClock.update(slotID: slotID, seconds: max(0, time.seconds - startOffset))
+                    }
+                }
+            }
+
+            player?.isMuted = isMuted
+            player?.audioOutputDeviceUniqueID = audioOutputDeviceID
+            playbackClock.setPlaying(slotID: slotID, isPlaying: isPlaying)
+            syncVideoIfNeeded(syncTime: syncTime, startOffset: startOffset, duration: duration)
+            if isPlaying {
+                player?.play()
+            } else {
+                player?.pause()
+            }
+        }
+
+        @MainActor
+        private func syncVideoIfNeeded(syncTime: TimeInterval, startOffset: TimeInterval, duration: TimeInterval) {
+            guard let player, duration > 0, player.timeControlStatus != .paused else { return }
+            let targetSeconds = syncTime.truncatingRemainder(dividingBy: duration)
+            let currentSeconds = max(0, player.currentTime().seconds - startOffset)
+            guard currentSeconds.isFinite, targetSeconds.isFinite else { return }
+            let directDifference = abs(currentSeconds - targetSeconds)
+            let wrappedDifference = duration - directDifference
+            let difference = min(directDifference, wrappedDifference)
+            guard difference > 0.12, Date().timeIntervalSince(lastSyncSeek) > 0.4 else { return }
+            lastSyncSeek = Date()
+            let target = CMTimeAdd(
+                CMTime(seconds: startOffset, preferredTimescale: 600),
+                CMTime(seconds: max(0, targetSeconds), preferredTimescale: 600)
+            )
+            player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+
+        deinit {
+            if let timeObserver, let player {
+                player.removeTimeObserver(timeObserver)
+            }
+        }
+    }
+}
+
+final class PlayerHostView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+    }
+
+    override func makeBackingLayer() -> CALayer {
+        AVPlayerLayer()
+    }
+
+    var playerLayer: AVPlayerLayer {
+        layer as! AVPlayerLayer
+    }
+}
+
+@MainActor
+final class LoopPlaybackClock: ObservableObject {
+    struct Sample {
+        var seconds: TimeInterval
+        var date: Date
+        var isPlaying: Bool
+    }
+
+    @Published private var samples: [UUID: Sample] = [:]
+
+    func time(for slotID: UUID) -> TimeInterval {
+        guard let sample = samples[slotID] else { return 0 }
+        guard sample.isPlaying else { return sample.seconds }
+        return sample.seconds + Date().timeIntervalSince(sample.date)
+    }
+
+    func update(slotID: UUID, seconds: TimeInterval) {
+        let isPlaying = samples[slotID]?.isPlaying ?? true
+        samples[slotID] = Sample(seconds: seconds.isFinite ? seconds : 0, date: Date(), isPlaying: isPlaying)
+    }
+
+    func setPlaying(slotID: UUID, isPlaying: Bool) {
+        let current = time(for: slotID)
+        samples[slotID] = Sample(seconds: current, date: Date(), isPlaying: isPlaying)
+    }
+}
