@@ -252,7 +252,7 @@ struct LoopPlayerView: NSViewRepresentable {
             } else {
                 currentSeconds = 0
             }
-            let fadeDuration = duration > 0 ? max(0.05, duration - currentSeconds) : 0.16
+            let fadeDuration = duration > 0 ? max(0.18, duration - currentSeconds) : 0.18
 
             if let playerLayer {
                 CATransaction.begin()
@@ -275,7 +275,7 @@ struct LoopPlayerView: NSViewRepresentable {
             isFadingOut = true
             didFadeIn = false
             let duration = max(0, currentDuration)
-            let fadeDuration = duration > 0 ? max(0.05, duration - currentSeconds) : 0.16
+            let fadeDuration = duration > 0 ? max(0.18, duration - currentSeconds) : 0.18
             if let playerLayer {
                 CATransaction.begin()
                 CATransaction.setAnimationDuration(fadeDuration)

@@ -837,11 +837,13 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
                 ?? assetDuration.map { max(0.25, $0) }
                 ?? Date().timeIntervalSince(pendingStartDate ?? Date())
             let endTrim = completedVideoEndTrims[recordingSlotIndex] ?? 0
-            let mediaAudioStartOffset = await detectedMediaAudioStartOffset(for: outputFileURL)
-            let startOffset = mediaAudioStartOffset
-                ?? (recordingSlotIndex == 1
-                    ? loopStartOffset()
-                    : recordingStartOffset() ?? videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim))
+            let startOffset: TimeInterval
+            if recordingSlotIndex == 1 {
+                startOffset = await detectedMediaAudioStartOffset(for: outputFileURL) ?? loopStartOffset()
+            } else {
+                startOffset = recordingStartOffset()
+                    ?? videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
+            }
             slots[slotPosition].url = outputFileURL
             slots[slotPosition].createdAt = Date()
             slots[slotPosition].startOffset = startOffset
