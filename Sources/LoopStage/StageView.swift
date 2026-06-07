@@ -44,7 +44,9 @@ struct StageView: View {
                     }
 
                     StageCaptureView { view in
-                        stageCaptureView = view
+                        if stageCaptureView !== view {
+                            stageCaptureView = view
+                        }
                     }
                 }
                 .coordinateSpace(name: "stage")
@@ -219,6 +221,7 @@ struct StageView: View {
                             metronome.applyTempo()
                             if metronome.isPlaying {
                                 capture.tempoBPM = metronome.bpm
+                                capture.setMetronomeGridBPM(metronome.bpm)
                             }
                         }
                     Slider(value: $metronome.bpm, in: 20...300)
@@ -227,13 +230,19 @@ struct StageView: View {
                             metronome.applyTempo()
                             if metronome.isPlaying {
                                 capture.tempoBPM = metronome.bpm
+                                capture.setMetronomeGridBPM(metronome.bpm)
                             }
                         }
                         .help("Metronome tempo")
                     Button {
                         metronome.applyTempo()
                         metronome.togglePlay()
-                        capture.tempoBPM = metronome.isPlaying ? metronome.bpm : capture.tempoBPM
+                        if metronome.isPlaying {
+                            capture.tempoBPM = metronome.bpm
+                            capture.setMetronomeGridBPM(metronome.bpm)
+                        } else {
+                            capture.setMetronomeGridBPM(nil)
+                        }
                     } label: {
                         Image(systemName: metronome.isPlaying ? "stop.fill" : "play.fill")
                     }

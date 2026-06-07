@@ -140,6 +140,15 @@ final class AudioLoopEngine {
         return duration
     }
 
+    func currentRecordingDuration(slot: Int) -> TimeInterval? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard recordingSlot == slot else { return nil }
+        let count = min(recordBufferLeft.count, recordBufferRight.count)
+        guard count > 0 else { return 0 }
+        return Double(count) / sampleRate
+    }
+
     func clear(slot: Int) {
         lock.lock()
         loops.removeValue(forKey: slot)

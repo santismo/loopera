@@ -21,6 +21,7 @@ final class CaptureController: NSObject, ObservableObject {
     @Published var tempoBPM: Double?
     @Published var selectedSlotIndex: Int?
     @Published var crossfadeMilliseconds: Double = 35
+    @Published var metronomeGridBPM: Double?
     @Published var offsetProfile = OffsetProfile()
     @Published private(set) var loopPlaybackTimes: [Int: TimeInterval] = [:]
     @Published private(set) var loopPlaybackTimeUpdatedAt = Date()
@@ -46,6 +47,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var previousMasterPhase: Double?
     private var previousStoppingPhases: [Int: Double] = [:]
     private var lastPlaybackPublishDate = Date.distantPast
+    private var lastMeterPublishDate = Date.distantPast
     nonisolated(unsafe) var performanceAudioHandler: ((AudioLoopEngine.InputBuffer, Double, CMTime) -> Void)?
     private nonisolated(unsafe) var audioChannelPairStartForCapture = 0
     private let lastAudioDeviceIDKey = "Loopera.lastAudioDeviceID"
@@ -437,6 +439,9 @@ final class CaptureController: NSObject, ObservableObject {
         if refresh {
             refreshDevices()
         }
+        let previousVideoID = selectedDeviceID
+        let previousAudioIDs = selectedAudioDeviceIDs
+        let previousPairStart = selectedAudioChannelPairStart
         if videoDevices.contains(where: { $0.uniqueID == videoDeviceID }) {
             selectedDeviceID = videoDeviceID
         }
@@ -450,7 +455,10 @@ final class CaptureController: NSObject, ObservableObject {
         if let selectedAudioID = selectedAudioDeviceIDs.first {
             UserDefaults.standard.set(selectedAudioID, forKey: lastAudioDeviceIDKey)
         }
-        if isConfigured {
+        let devicesChanged = previousVideoID != selectedDeviceID ||
+            previousAudioIDs != selectedAudioDeviceIDs ||
+            previousPairStart != selectedAudioChannelPairStart
+        if isConfigured, devicesChanged {
             scheduleSessionReconfigure(delayMilliseconds: refresh ? 450 : 80)
         }
     }
@@ -466,11 +474,22 @@ final class CaptureController: NSObject, ObservableObject {
         status = "Tempo detected from master: \(Int(detected.rounded())) BPM."
     }
 
+    func setMetronomeGridBPM(_ bpm: Double?) {
+        if let bpm {
+            metronomeGridBPM = max(20, min(300, bpm))
+        } else {
+            metronomeGridBPM = nil
+        }
+    }
+
     func updateInputMeter(rms: Double, peak: Double, presentationTime: CMTime) {
         if isRecording, recordingSlotIndex == 1, captureStartPTS == nil {
             captureStartPTS = presentationTime
         }
 
+        let now = Date()
+        guard now.timeIntervalSince(lastMeterPublishDate) >= 1.0 / 20.0 else { return }
+        lastMeterPublishDate = now
         inputLevel = min(1, max(inputLevel * 0.72, rms * 4.5, peak))
     }
 
@@ -580,6 +599,23 @@ final class CaptureController: NSObject, ObservableObject {
 
     private func stopRecordingQuantized() {
         guard isRecording else { return }
+        if recordingSlotIndex == 1,
+           let metronomeGridBPM,
+           let currentDuration = audioLoopEngine.currentRecordingDuration(slot: 1),
+           let targetDuration = targetMetronomeStopDuration(currentDuration, bpm: metronomeGridBPM) {
+            let delay = targetDuration - currentDuration
+            if delay > 0.02 {
+                stopTask?.cancel()
+                status = "Master will close on metronome beat."
+                stopTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(delay))
+                    await MainActor.run {
+                        self?.stopRecordingNow()
+                    }
+                }
+                return
+            }
+        }
         guard recordingSlotIndex != 1, masterDuration != nil else {
             stopRecordingNow()
             return
@@ -610,6 +646,11 @@ final class CaptureController: NSObject, ObservableObject {
             var trimEndSeconds = pendingStopTrimEndSeconds
             if recordingSlotIndex == 1 {
                 trimEndSeconds = max(0, trimEndSeconds + offsetProfile.audioStopOffsetMilliseconds / 1000)
+                if let metronomeGridBPM,
+                   let currentDuration = audioLoopEngine.currentRecordingDuration(slot: recordingSlotIndex) {
+                    let quantized = quantizedMetronomeDuration(currentDuration, bpm: metronomeGridBPM)
+                    trimEndSeconds = max(0, currentDuration - quantized)
+                }
             }
             let duration = audioLoopEngine.finishRecording(slot: recordingSlotIndex, trimEndSeconds: trimEndSeconds)
             completedAudioDurations[recordingSlotIndex] = duration
@@ -876,8 +917,9 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
             if recordingSlotIndex == 1 {
                 startOffset = await detectedMediaAudioStartOffset(for: outputFileURL) ?? loopStartOffset()
             } else {
-                startOffset = recordingStartOffset()
-                    ?? videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
+                startOffset = videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
+                    ?? recordingStartOffset()
+                    ?? 0
             }
             slots[slotPosition].url = outputFileURL
             slots[slotPosition].createdAt = Date()
@@ -920,6 +962,20 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
         }
         let multiple = max(1, Int((duration / masterDuration).rounded()))
         return Double(multiple) * masterDuration
+    }
+
+    private func quantizedMetronomeDuration(_ duration: TimeInterval, bpm: Double) -> TimeInterval {
+        guard duration.isFinite, duration > 0, bpm.isFinite, bpm > 0 else { return duration }
+        let beat = 60.0 / bpm
+        let beats = max(1, Int((duration / beat).rounded()))
+        return Double(beats) * beat
+    }
+
+    private func targetMetronomeStopDuration(_ duration: TimeInterval, bpm: Double) -> TimeInterval? {
+        guard duration.isFinite, duration > 0, bpm.isFinite, bpm > 0 else { return nil }
+        let beat = 60.0 / bpm
+        let beats = max(1, Int((duration / beat).rounded()))
+        return Double(beats) * beat
     }
 
     private func detectedMediaAudioStartOffset(for url: URL) async -> TimeInterval? {
@@ -986,9 +1042,9 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
         return nil
     }
 
-    private func videoStartOffset(assetDuration: TimeInterval?, loopDuration: TimeInterval, endTrim: TimeInterval) -> TimeInterval {
+    private func videoStartOffset(assetDuration: TimeInterval?, loopDuration: TimeInterval, endTrim: TimeInterval) -> TimeInterval? {
         guard let assetDuration, assetDuration.isFinite, assetDuration > 0, loopDuration.isFinite, loopDuration > 0 else {
-            return 0
+            return nil
         }
         let videoEnd = max(0, assetDuration - max(0, endTrim))
         return max(0, videoEnd - loopDuration)

@@ -243,10 +243,7 @@ struct LoopPlayerView: NSViewRepresentable {
             let fadeDuration = duration > 0 ? max(0.18, duration - currentSeconds) : 0.18
 
             if let playerLayer {
-                CATransaction.begin()
-                CATransaction.setAnimationDuration(fadeDuration)
-                playerLayer.opacity = 0
-                CATransaction.commit()
+                animateOpacity(of: playerLayer, to: 0, duration: fadeDuration)
             }
 
             let startTime = CMTime(seconds: startOffset, preferredTimescale: 600)
@@ -265,11 +262,21 @@ struct LoopPlayerView: NSViewRepresentable {
             let duration = max(0, currentDuration)
             let fadeDuration = duration > 0 ? max(0.18, duration - currentSeconds) : 0.18
             if let playerLayer {
-                CATransaction.begin()
-                CATransaction.setAnimationDuration(fadeDuration)
-                playerLayer.opacity = 0
-                CATransaction.commit()
+                animateOpacity(of: playerLayer, to: 0, duration: fadeDuration)
             }
+        }
+
+        @MainActor
+        private func animateOpacity(of layer: CALayer, to opacity: Float, duration: TimeInterval) {
+            let fromOpacity = (layer.presentation() ?? layer).opacity
+            layer.removeAnimation(forKey: "loopera.opacity")
+            let animation = CABasicAnimation(keyPath: "opacity")
+            animation.fromValue = fromOpacity
+            animation.toValue = opacity
+            animation.duration = max(0.01, duration)
+            animation.timingFunction = CAMediaTimingFunction(name: .linear)
+            layer.opacity = opacity
+            layer.add(animation, forKey: "loopera.opacity")
         }
 
         private func audioPhaseSeconds(syncTime: TimeInterval, syncTimeUpdatedAt: Date, duration: TimeInterval) -> TimeInterval {
