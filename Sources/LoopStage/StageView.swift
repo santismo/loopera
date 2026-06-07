@@ -945,6 +945,7 @@ private struct LoopTile: View {
                 )
                     .clipShape(tileShape)
                     .shadow(color: .black.opacity(editMode ? 0 : 0.45), radius: editMode ? 0 : 16, y: editMode ? 0 : 8)
+                    .opacity(videoOpacity)
             } else {
                 tileShape
                     .fill(editMode ? .white.opacity(0.045) : .clear)
@@ -960,6 +961,16 @@ private struct LoopTile: View {
             }
         }
         .aspectRatio(1, contentMode: .fit)
+    }
+
+    private var videoOpacity: Double {
+        guard slot.state == .recorded else { return 1 }
+        guard slot.isPlaying else { return 0 }
+        guard slot.isStopping, slot.duration > 0 else { return 1 }
+        let phase = (syncTime + Date().timeIntervalSince(syncTimeUpdatedAt))
+            .truncatingRemainder(dividingBy: slot.duration)
+        let remaining = max(0, slot.duration - phase)
+        return max(0, min(1, remaining / slot.duration))
     }
 
     private var ringColor: Color? {

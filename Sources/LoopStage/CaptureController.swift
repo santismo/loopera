@@ -929,7 +929,7 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
                     }
                     if peak >= thresholdValue {
                         let detected = presentationTime + Double(frame) / sampleRate - thresholdLeadMilliseconds / 1000
-                        return max(0, detected)
+                        return max(0, detected - 0.035)
                     }
                 }
             }
