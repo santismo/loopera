@@ -282,6 +282,21 @@ final class CaptureController: NSObject, ObservableObject {
         status = "Cleared loops."
     }
 
+    func toggleAllPlayback() {
+        let recordedIndices = slots.indices.filter { slots[$0].state == .recorded }
+        guard !recordedIndices.isEmpty else {
+            status = "No recorded loops to play."
+            return
+        }
+
+        let shouldPlay = !recordedIndices.contains { slots[$0].isPlaying }
+        for index in recordedIndices {
+            slots[index].isPlaying = shouldPlay
+            audioLoopEngine.setPlaying(slot: slots[index].index, isPlaying: shouldPlay)
+        }
+        status = shouldPlay ? "Playing all loops." : "Stopped all loops."
+    }
+
     func setCustomPosition(slot number: Int, position: CGPointUnit) {
         guard let slotPosition = slots.firstIndex(where: { $0.index == number }) else { return }
         slots[slotPosition].customPosition = position

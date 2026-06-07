@@ -67,7 +67,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         let width = max(1280, Int(windowMetrics.width * windowMetrics.scale))
         let height = max(720, Int(windowMetrics.height * windowMetrics.scale))
 
-        let outputURL = FileManager.default.temporaryDirectory
+        let outputURL = Self.recordingsDirectory
             .appendingPathComponent("Loopera-Performance-\(Self.timestamp())")
             .appendingPathExtension("mov")
 
@@ -178,6 +178,14 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         return formatter.string(from: Date())
+    }
+
+    nonisolated static var recordingsDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Loopera", isDirectory: true)
+            .appendingPathComponent("Performances", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
     }
 }
 

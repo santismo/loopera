@@ -14,6 +14,7 @@ struct StageView: View {
     @State private var dragPositions: [UUID: CGPointUnit] = [:]
     @State private var layoutName = "Default"
     @State private var savedLayoutNames: [String] = []
+    @FocusState private var layoutNameFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -141,13 +142,22 @@ struct StageView: View {
                 }
                 .frame(width: 180)
 
-                Picker("Layout", selection: $layout) {
-                    ForEach(StageLayout.allCases) { layout in
-                        Text(layout.rawValue).tag(layout)
-                    }
+                layoutPresetControls
+
+                Button {
+                    toggleWindowMode()
+                } label: {
+                    Image(systemName: "rectangle.on.rectangle")
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 190)
+                .help("Toggle fullscreen/window mode")
+
+                Button {
+                    capture.toggleAllPlayback()
+                } label: {
+                    Label("All", systemImage: allLoopsArePlaying ? "pause.fill" : "play.fill")
+                }
+                .help("Play or stop all loops")
+                .keyboardShortcut(.space, modifiers: [.command])
             }
 
             HStack(spacing: 10) {
@@ -157,7 +167,7 @@ struct StageView: View {
                     Text("Thr")
                         .font(.system(size: 11, weight: .medium))
                     Slider(value: $capture.threshold, in: 0.0005...0.2)
-                        .frame(width: 130)
+                        .frame(width: 120)
                 }
 
                 HStack(spacing: 7) {
@@ -186,8 +196,6 @@ struct StageView: View {
                 }
                 .disabled(editMode)
 
-                layoutPresetControls
-
                 Button {
                     if performance.isRecording {
                         Task { await performance.stop() }
@@ -195,11 +203,18 @@ struct StageView: View {
                         performance.start()
                     }
                 } label: {
-                    Label(performance.isRecording ? "End Program" : "Record Program", systemImage: "rectangle.dashed.badge.record")
+                    Label(performance.isRecording ? "Stop Performance" : "Record Performance", systemImage: "rectangle.dashed.badge.record")
                 }
                 .disabled(editMode)
 
-                Text(capture.status)
+                Button {
+                    openPerformanceFolder()
+                } label: {
+                    Image(systemName: "folder")
+                }
+                .help("Show saved performances")
+
+                Text(statusText)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.66))
                     .lineLimit(1)
@@ -248,7 +263,11 @@ struct StageView: View {
         HStack(spacing: 6) {
             TextField("Layout", text: $layoutName)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 104)
+                .focused($layoutNameFocused)
+                .onSubmit {
+                    saveLayout()
+                }
+                .frame(width: 150)
 
             Button {
                 saveLayout()
@@ -268,10 +287,30 @@ struct StageView: View {
                     }
                 }
             } label: {
-                Image(systemName: "folder")
+                Label("Layouts", systemImage: "rectangle.stack")
             }
             .help("Load named layout")
         }
+    }
+
+    private var allLoopsArePlaying: Bool {
+        let recorded = capture.slots.filter { $0.state == .recorded }
+        return !recorded.isEmpty && recorded.allSatisfy(\.isPlaying)
+    }
+
+    private var statusText: String {
+        if performance.isRecording || performance.status != "Program recorder idle." {
+            return performance.status
+        }
+        return capture.status
+    }
+
+    private func toggleWindowMode() {
+        NSApp.keyWindow?.toggleFullScreen(nil)
+    }
+
+    private func openPerformanceFolder() {
+        NSWorkspace.shared.open(PerformanceRecorder.recordingsDirectory)
     }
 
     private var editControlsOverlay: some View {
@@ -691,6 +730,10 @@ struct StageView: View {
     }
 
     private func handleKeyPress(_ press: KeyPress) -> KeyPress.Result {
+        if layoutNameFocused {
+            return .ignored
+        }
+
         if editMode {
             if press.key == .delete || press.key == .deleteForward {
                 capture.deleteSelected()
@@ -726,6 +769,11 @@ struct StageView: View {
     private func handleEvent(_ event: NSEvent) -> Bool {
         if NSApp.keyWindow?.firstResponder is NSTextView {
             return false
+        }
+
+        if event.modifierFlags.contains(.command), event.keyCode == 49 {
+            capture.toggleAllPlayback()
+            return true
         }
 
         if editMode {
