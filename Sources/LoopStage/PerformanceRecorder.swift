@@ -1,18 +1,14 @@
 import AppKit
 @preconcurrency import AVFoundation
 import Foundation
-@preconcurrency import ScreenCaptureKit
 
 final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable {
     @Published private(set) var isRecording = false
     @Published private(set) var status = "Program recorder idle."
     @Published private(set) var lastRecordingURL: URL?
 
-    private var stream: SCStream?
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
-    private var appAudioInput: AVAssetWriterInput?
-    private var microphoneInput: AVAssetWriterInput?
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var didStartSession = false
     private var isFinishing = false
@@ -23,44 +19,24 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     @MainActor
     func start(microphoneDeviceID: String?, fallbackView: NSView?) {
         guard !isRecording else { return }
-        status = "Preparing window recorder..."
+        status = "Preparing performance recorder..."
 
-        Task {
-            do {
-                try await startCaptureWithFallbacks(microphoneDeviceID: microphoneDeviceID)
-                await MainActor.run {
-                    isRecording = true
-                    status = "Recording performance."
-                }
-            } catch {
-                await MainActor.run {
-                    do {
-                        try startFallbackViewCapture(view: fallbackView)
-                        isRecording = true
-                        status = "Recording performance video."
-                    } catch {
-                        Task { await stop() }
-                        status = "Performance recording failed: \(error.localizedDescription)"
-                    }
-                }
-            }
+        do {
+            try startFallbackViewCapture(view: fallbackView)
+            isRecording = true
+            status = "Recording performance video."
+        } catch {
+            Task { await stop() }
+            status = "Performance recording failed: \(error.localizedDescription)"
         }
     }
 
     @MainActor
     func stop() async {
-        let activeStream = stream
-        stream = nil
         isRecording = false
-        status = "Finishing program recording..."
+        status = "Finishing performance recording..."
         fallbackTimer?.cancel()
         fallbackTimer = nil
-
-        do {
-            try await activeStream?.stopCapture()
-        } catch {
-            status = "Stopped with capture warning: \(error.localizedDescription)"
-        }
 
         await finishWriter()
     }
@@ -75,7 +51,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             .appendingPathComponent("Loopera-Performance-\(Self.timestamp())")
             .appendingPathExtension("mov")
 
-        try prepareWriter(outputURL: outputURL, width: width, height: height, includesAppAudio: false, includesMicrophone: false)
+        try prepareWriter(outputURL: outputURL, width: width, height: height)
         lastRecordingURL = outputURL
         fallbackStartTime = Date()
 
@@ -95,83 +71,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         timer.resume()
     }
 
-    private func startCaptureWithFallbacks(microphoneDeviceID: String?) async throws {
-        var errors: [String] = []
-        let attempts: [(deviceID: String?, captureMicrophone: Bool)] = [
-            (microphoneDeviceID, microphoneDeviceID != nil),
-            (nil, true),
-            (nil, false)
-        ]
-
-        for attempt in attempts {
-            do {
-                try await startCapture(microphoneDeviceID: attempt.deviceID, captureMicrophone: attempt.captureMicrophone)
-                return
-            } catch {
-                errors.append(error.localizedDescription)
-                cleanupWriter()
-            }
-        }
-
-        throw RecorderError.captureStartFailed(errors.joined(separator: " / "))
-    }
-
-    private func startCapture(microphoneDeviceID: String?, captureMicrophone: Bool) async throws {
-        let windowMetrics = await MainActor.run { () -> (scale: CGFloat, width: CGFloat, height: CGFloat)? in
-            guard let window = NSApp.windows.first(where: { $0.isVisible }) else { return nil }
-            let scale = window.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-            return (scale, window.frame.width, window.frame.height)
-        }
-
-        guard let windowMetrics else {
-            throw RecorderError.noWindow
-        }
-
-        let width = max(1280, Int(windowMetrics.width * windowMetrics.scale))
-        let height = max(720, Int(windowMetrics.height * windowMetrics.scale))
-
-        let outputURL = Self.recordingsDirectory
-            .appendingPathComponent("Loopera-Performance-\(Self.timestamp())")
-            .appendingPathExtension("mov")
-
-        try prepareWriter(outputURL: outputURL, width: width, height: height, includesAppAudio: true, includesMicrophone: captureMicrophone)
-
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        guard let scWindow = content.windows.first(where: { candidate in
-            candidate.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier
-        }) else {
-            throw RecorderError.noShareableWindow
-        }
-
-        let filter = SCContentFilter(desktopIndependentWindow: scWindow)
-        let configuration = SCStreamConfiguration()
-        configuration.width = width
-        configuration.height = height
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
-        configuration.queueDepth = 5
-        configuration.showsCursor = false
-        configuration.capturesAudio = true
-        configuration.excludesCurrentProcessAudio = false
-        configuration.sampleRate = 48_000
-        configuration.channelCount = 2
-        if #available(macOS 15.0, *) {
-            configuration.captureMicrophone = captureMicrophone
-            configuration.microphoneCaptureDeviceID = microphoneDeviceID
-        }
-
-        let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
-        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
-        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
-        if #available(macOS 15.0, *), captureMicrophone {
-            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: sampleQueue)
-        }
-        try await stream.startCapture()
-
-        self.stream = stream
-        lastRecordingURL = outputURL
-    }
-
-    private func prepareWriter(outputURL: URL, width: Int, height: Int, includesAppAudio: Bool = true, includesMicrophone: Bool) throws {
+    private func prepareWriter(outputURL: URL, width: Int, height: Int) throws {
         didStartSession = false
         isFinishing = false
 
@@ -193,32 +93,8 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             ]
         )
 
-        let appAudioSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVNumberOfChannelsKey: 2,
-            AVSampleRateKey: 48_000,
-            AVEncoderBitRateKey: 128_000
-        ]
-        let appAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: appAudioSettings)
-        appAudioInput.expectsMediaDataInRealTime = true
-
-        let microphoneSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVNumberOfChannelsKey: 2,
-            AVSampleRateKey: 48_000,
-            AVEncoderBitRateKey: 128_000
-        ]
-        let microphoneInput = AVAssetWriterInput(mediaType: .audio, outputSettings: microphoneSettings)
-        microphoneInput.expectsMediaDataInRealTime = true
-
         if writer.canAdd(videoInput) {
             writer.add(videoInput)
-        }
-        if includesAppAudio, writer.canAdd(appAudioInput) {
-            writer.add(appAudioInput)
-        }
-        if includesMicrophone, writer.canAdd(microphoneInput) {
-            writer.add(microphoneInput)
         }
 
         guard writer.startWriting() else {
@@ -227,8 +103,6 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
         self.writer = writer
         self.videoInput = videoInput
-        self.appAudioInput = includesAppAudio ? appAudioInput : nil
-        self.microphoneInput = includesMicrophone ? microphoneInput : nil
         self.pixelBufferAdaptor = adaptor
     }
 
@@ -237,8 +111,6 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             self.writer?.cancelWriting()
             self.writer = nil
             self.videoInput = nil
-            self.appAudioInput = nil
-            self.microphoneInput = nil
             self.pixelBufferAdaptor = nil
             self.didStartSession = false
             self.isFinishing = false
@@ -252,12 +124,8 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
                 self.isFinishing = true
                 let writer = self.writer
                 self.videoInput?.markAsFinished()
-                self.appAudioInput?.markAsFinished()
-                self.microphoneInput?.markAsFinished()
                 self.writer = nil
                 self.videoInput = nil
-                self.appAudioInput = nil
-                self.microphoneInput = nil
                 self.pixelBufferAdaptor = nil
                 self.didStartSession = false
                 self.isFinishing = false
@@ -303,44 +171,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     }
 }
 
-extension PerformanceRecorder: SCStreamOutput {
-    nonisolated func stream(
-        _ stream: SCStream,
-        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-        of outputType: SCStreamOutputType
-    ) {
-        guard sampleBuffer.isValid, !isFinishing else { return }
-
-        switch outputType {
-        case .screen:
-            appendVideo(sampleBuffer)
-        case .audio:
-            appendAppAudio(sampleBuffer)
-        case .microphone:
-            appendMicrophone(sampleBuffer)
-        @unknown default:
-            break
-        }
-    }
-
-    private func appendVideo(_ sampleBuffer: CMSampleBuffer) {
-        guard
-            let writer,
-            let videoInput,
-            let pixelBufferAdaptor,
-            videoInput.isReadyForMoreMediaData,
-            let imageBuffer = sampleBuffer.imageBuffer
-        else { return }
-
-        let presentationTime = sampleBuffer.presentationTimeStamp
-        if !didStartSession {
-            writer.startSession(atSourceTime: presentationTime)
-            didStartSession = true
-        }
-
-        pixelBufferAdaptor.append(imageBuffer, withPresentationTime: presentationTime)
-    }
-
+extension PerformanceRecorder {
     @MainActor
     private func snapshot(view: NSView, width: Int, height: Int) -> CGImage? {
         let bitmap = NSBitmapImageRep(
@@ -395,36 +226,18 @@ extension PerformanceRecorder: SCStreamOutput {
         pixelBufferAdaptor.append(buffer, withPresentationTime: time)
     }
 
-    private func appendAppAudio(_ sampleBuffer: CMSampleBuffer) {
-        guard didStartSession, let appAudioInput, appAudioInput.isReadyForMoreMediaData else { return }
-        appAudioInput.append(sampleBuffer)
-    }
-
-    private func appendMicrophone(_ sampleBuffer: CMSampleBuffer) {
-        guard didStartSession, let microphoneInput, microphoneInput.isReadyForMoreMediaData else { return }
-        microphoneInput.append(sampleBuffer)
-    }
 }
 
 private enum RecorderError: LocalizedError {
-    case noWindow
-    case noShareableWindow
     case noStageView
     case writerStartFailed
-    case captureStartFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .noWindow:
-            return "No visible Loopera window was found."
-        case .noShareableWindow:
-            return "Loopera could not find its own window in ScreenCaptureKit."
         case .noStageView:
             return "Loopera could not find the stage view to record."
         case .writerStartFailed:
             return "The movie writer could not start."
-        case .captureStartFailed(let detail):
-            return "Performance capture could not start. \(detail)"
         }
     }
 }
