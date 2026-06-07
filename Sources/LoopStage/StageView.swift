@@ -157,7 +157,7 @@ struct StageView: View {
                     Label("All", systemImage: allLoopsArePlaying ? "pause.fill" : "play.fill")
                 }
                 .help("Play or stop all loops")
-                .keyboardShortcut(.space, modifiers: [.command])
+                .keyboardShortcut(.space, modifiers: [.shift])
             }
 
             HStack(spacing: 10) {
@@ -771,7 +771,7 @@ struct StageView: View {
             return false
         }
 
-        if event.modifierFlags.contains(.command), event.keyCode == 49 {
+        if event.modifierFlags.contains(.shift), event.keyCode == 49 {
             capture.toggleAllPlayback()
             return true
         }

@@ -91,7 +91,7 @@ struct LoopPlayerView: NSViewRepresentable {
         private var player: AVQueuePlayer?
         private var looper: AVPlayerLooper?
         private var timeObserver: Any?
-        private var lastSyncSeek = Date.distantPast
+        private var wasPlaying = false
 
         @MainActor
         func configure(
@@ -115,6 +115,7 @@ struct LoopPlayerView: NSViewRepresentable {
                 currentURL = url
                 currentStartOffset = startOffset
                 currentDuration = duration
+                wasPlaying = false
 
                 let item = AVPlayerItem(url: url)
                 item.preferredForwardBufferDuration = 0
@@ -155,24 +156,21 @@ struct LoopPlayerView: NSViewRepresentable {
             player?.audioOutputDeviceUniqueID = audioOutputDeviceID
             playbackClock.setPlaying(slotID: slotID, isPlaying: isPlaying)
             if isPlaying {
-                syncVideoIfNeeded(syncTime: syncTime, startOffset: startOffset, duration: duration, force: player?.timeControlStatus == .paused)
+                if !wasPlaying {
+                    syncVideoToClock(syncTime: syncTime, startOffset: startOffset, duration: duration)
+                }
                 player?.play()
             } else {
                 player?.pause()
             }
+            wasPlaying = isPlaying
         }
 
         @MainActor
-        private func syncVideoIfNeeded(syncTime: TimeInterval, startOffset: TimeInterval, duration: TimeInterval, force: Bool = false) {
+        private func syncVideoToClock(syncTime: TimeInterval, startOffset: TimeInterval, duration: TimeInterval) {
             guard let player, duration > 0 else { return }
             let targetSeconds = syncTime.truncatingRemainder(dividingBy: duration)
-            let currentSeconds = max(0, player.currentTime().seconds - startOffset)
-            guard currentSeconds.isFinite, targetSeconds.isFinite else { return }
-            let directDifference = abs(currentSeconds - targetSeconds)
-            let wrappedDifference = duration - directDifference
-            let difference = min(directDifference, wrappedDifference)
-            guard force || (difference > 0.12 && Date().timeIntervalSince(lastSyncSeek) > 0.4) else { return }
-            lastSyncSeek = Date()
+            guard targetSeconds.isFinite else { return }
             let target = CMTimeAdd(
                 CMTime(seconds: startOffset, preferredTimescale: 600),
                 CMTime(seconds: max(0, targetSeconds), preferredTimescale: 600)
