@@ -49,6 +49,8 @@ final class AudioLoopEngine {
     private var recordBufferLeft: [Float] = []
     private var recordBufferRight: [Float] = []
     private var requestedStop = false
+    var performanceOutputHandler: ((InputBuffer, Double, CMTime) -> Void)?
+    private var renderSamplePosition: Int64 = 0
 
     init() {
         configureEngine()
@@ -275,6 +277,29 @@ final class AudioLoopEngine {
                 data[frame] = max(-0.98, min(0.98, data[frame]))
             }
         }
+
+        if let performanceOutputHandler {
+            var left = [Float](repeating: 0, count: frameCount)
+            var right = [Float](repeating: 0, count: frameCount)
+            if abl.count == 1,
+               let data = abl[0].mData?.assumingMemoryBound(to: Float.self) {
+                for frame in 0..<frameCount {
+                    left[frame] = data[frame]
+                    right[frame] = data[frame]
+                }
+            } else if abl.count > 1,
+                      let leftData = abl[0].mData?.assumingMemoryBound(to: Float.self),
+                      let rightData = abl[1].mData?.assumingMemoryBound(to: Float.self) {
+                for frame in 0..<frameCount {
+                    left[frame] = leftData[frame]
+                    right[frame] = rightData[frame]
+                }
+            }
+
+            let outputPTS = CMTime(value: renderSamplePosition, timescale: CMTimeScale(sampleRate.rounded()))
+            performanceOutputHandler(InputBuffer(left: left, right: right), sampleRate, outputPTS)
+        }
+        renderSamplePosition += Int64(frameCount)
     }
 
     private func beginRecordingLocked(slot: Int, preRollSamples: Int?) {

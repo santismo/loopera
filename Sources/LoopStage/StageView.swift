@@ -206,9 +206,16 @@ struct StageView: View {
 
                 Button {
                     if performance.isRecording {
+                        capture.setPerformanceLoopAudioHandler(nil)
                         Task { await performance.stop() }
                     } else {
+                        capture.setPerformanceLoopAudioHandler { input, sampleRate, presentationTime in
+                            performance.appendLoopAudio(input: input, sampleRate: sampleRate, presentationTime: presentationTime)
+                        }
                         performance.start(microphoneDeviceID: capture.selectedAudioDeviceIDs.first, fallbackView: stageCaptureView)
+                        if !performance.isRecording {
+                            capture.setPerformanceLoopAudioHandler(nil)
+                        }
                     }
                 } label: {
                     Label(performance.isRecording ? "Stop Performance" : "Record Performance", systemImage: "rectangle.dashed.badge.record")

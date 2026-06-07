@@ -9,13 +9,16 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
-    private var audioInput: AVAssetWriterInput?
+    private var liveAudioInput: AVAssetWriterInput?
+    private var loopAudioInput: AVAssetWriterInput?
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var didStartSession = false
     private var liveAudioStartPTS: CMTime?
+    private var loopAudioStartPTS: CMTime?
     private var isFinishing = false
     private var fallbackTimer: DispatchSourceTimer?
     private var fallbackStartTime: Date?
+    private nonisolated(unsafe) var acceptingAudio = false
     private let sampleQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.samples")
 
     @MainActor
@@ -25,6 +28,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
         do {
             try startFallbackViewCapture(view: fallbackView)
+            acceptingAudio = true
             isRecording = true
             status = "Recording performance video."
         } catch {
@@ -36,6 +40,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     @MainActor
     func stop() async {
         isRecording = false
+        acceptingAudio = false
         status = "Finishing performance recording..."
         fallbackTimer?.cancel()
         fallbackTimer = nil
@@ -59,7 +64,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         fallbackStartTime = startTime
 
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: 1.0 / 30.0)
+        timer.schedule(deadline: .now(), repeating: 1.0 / 60.0)
         timer.setEventHandler { [weak self, weak view] in
             guard let self, let view else { return }
             guard let image = self.snapshot(view: view, width: width, height: height) else { return }
@@ -77,10 +82,18 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         isFinishing = false
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        let targetBitrate = max(20_000_000, width * height * 12)
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
-            AVVideoHeightKey: height
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: targetBitrate,
+                AVVideoExpectedSourceFrameRateKey: 60,
+                AVVideoMaxKeyFrameIntervalKey: 60,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+                AVVideoAllowFrameReorderingKey: false
+            ]
         ]
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
@@ -100,16 +113,29 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVNumberOfChannelsKey: 2,
                 AVSampleRateKey: 48_000,
-                AVEncoderBitRateKey: 192_000
+                AVEncoderBitRateKey: 256_000
             ]
         )
         audioInput.expectsMediaDataInRealTime = true
+        let loopAudioInput = AVAssetWriterInput(
+            mediaType: .audio,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVNumberOfChannelsKey: 2,
+                AVSampleRateKey: 48_000,
+                AVEncoderBitRateKey: 256_000
+            ]
+        )
+        loopAudioInput.expectsMediaDataInRealTime = true
 
         if writer.canAdd(videoInput) {
             writer.add(videoInput)
         }
         if writer.canAdd(audioInput) {
             writer.add(audioInput)
+        }
+        if writer.canAdd(loopAudioInput) {
+            writer.add(loopAudioInput)
         }
 
         guard writer.startWriting() else {
@@ -118,7 +144,8 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
         self.writer = writer
         self.videoInput = videoInput
-        self.audioInput = audioInput
+        self.liveAudioInput = audioInput
+        self.loopAudioInput = loopAudioInput
         self.pixelBufferAdaptor = adaptor
     }
 
@@ -127,12 +154,15 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             self.writer?.cancelWriting()
             self.writer = nil
             self.videoInput = nil
-            self.audioInput = nil
+            self.liveAudioInput = nil
+            self.loopAudioInput = nil
             self.pixelBufferAdaptor = nil
             self.didStartSession = false
             self.liveAudioStartPTS = nil
+            self.loopAudioStartPTS = nil
             self.isFinishing = false
             self.fallbackStartTime = nil
+            self.acceptingAudio = false
         }
     }
 
@@ -142,14 +172,18 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
                 self.isFinishing = true
                 let writer = self.writer
                 self.videoInput?.markAsFinished()
-                self.audioInput?.markAsFinished()
+                self.liveAudioInput?.markAsFinished()
+                self.loopAudioInput?.markAsFinished()
                 self.writer = nil
                 self.videoInput = nil
-                self.audioInput = nil
+                self.liveAudioInput = nil
+                self.loopAudioInput = nil
                 self.pixelBufferAdaptor = nil
                 self.didStartSession = false
                 self.liveAudioStartPTS = nil
+                self.loopAudioStartPTS = nil
                 self.isFinishing = false
+                self.acceptingAudio = false
 
                 guard let writer else {
                     Task { @MainActor in
@@ -273,19 +307,44 @@ extension PerformanceRecorder {
     }
 
     func appendLiveAudio(input: AudioLoopEngine.InputBuffer, sampleRate: Double, presentationTime: CMTime) {
-        guard !input.isEmpty, sampleRate > 0 else { return }
+        appendAudio(input: input, sampleRate: sampleRate, presentationTime: presentationTime, source: .live)
+    }
+
+    func appendLoopAudio(input: AudioLoopEngine.InputBuffer, sampleRate: Double, presentationTime: CMTime) {
+        appendAudio(input: input, sampleRate: sampleRate, presentationTime: presentationTime, source: .loop)
+    }
+
+    private func appendAudio(
+        input: AudioLoopEngine.InputBuffer,
+        sampleRate: Double,
+        presentationTime: CMTime,
+        source: AudioSource
+    ) {
+        guard acceptingAudio, !input.isEmpty, sampleRate > 0 else { return }
         sampleQueue.async {
-            guard let audioInput = self.audioInput, audioInput.isReadyForMoreMediaData else { return }
+            let audioInput: AVAssetWriterInput?
+            let basePTS: CMTime?
+            switch source {
+            case .live:
+                audioInput = self.liveAudioInput
+                if self.liveAudioStartPTS == nil {
+                    self.liveAudioStartPTS = presentationTime
+                }
+                basePTS = self.liveAudioStartPTS
+            case .loop:
+                audioInput = self.loopAudioInput
+                if self.loopAudioStartPTS == nil {
+                    self.loopAudioStartPTS = presentationTime
+                }
+                basePTS = self.loopAudioStartPTS
+            }
+            guard let audioInput, audioInput.isReadyForMoreMediaData, let basePTS else { return }
 
             if !self.didStartSession {
                 self.writer?.startSession(atSourceTime: .zero)
                 self.didStartSession = true
             }
 
-            if self.liveAudioStartPTS == nil {
-                self.liveAudioStartPTS = presentationTime
-            }
-            guard let basePTS = self.liveAudioStartPTS else { return }
             let relativePTS = CMTimeSubtract(presentationTime, basePTS)
             guard relativePTS.isValid, relativePTS.seconds.isFinite else { return }
 
@@ -401,4 +460,9 @@ private enum RecorderError: LocalizedError {
             return "The movie writer could not start."
         }
     }
+}
+
+private enum AudioSource {
+    case live
+    case loop
 }

@@ -249,6 +249,10 @@ final class CaptureController: NSObject, ObservableObject {
         audioLoopEngine.restart(slot: number)
     }
 
+    func setPerformanceLoopAudioHandler(_ handler: ((AudioLoopEngine.InputBuffer, Double, CMTime) -> Void)?) {
+        audioLoopEngine.performanceOutputHandler = handler
+    }
+
     func deleteSelected() {
         guard let selectedSlotIndex else { return }
         clearSlot(selectedSlotIndex)
