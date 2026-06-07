@@ -99,7 +99,6 @@ struct LoopPlayerView: NSViewRepresentable {
         private weak var playerLayer: AVPlayerLayer?
         private var didFadeIn = false
         private var isFadingOut = false
-        private let visualPhaseDelay: TimeInterval = 0.11
 
         @MainActor
         func configure(
@@ -196,7 +195,7 @@ struct LoopPlayerView: NSViewRepresentable {
             force: Bool
         ) {
             guard let player, duration > 0 else { return }
-            if !force, Date().timeIntervalSince(lastSyncCorrection) < 0.12 {
+            if !force, Date().timeIntervalSince(lastSyncCorrection) < 0.5 {
                 return
             }
 
@@ -213,7 +212,7 @@ struct LoopPlayerView: NSViewRepresentable {
             } else {
                 wrappedDelta = rawDelta
             }
-            guard force || abs(wrappedDelta) > 0.015 else { return }
+            guard force || abs(wrappedDelta) > 0.09 else { return }
 
             let target = CMTimeAdd(
                 CMTime(seconds: startOffset, preferredTimescale: 600),
@@ -242,16 +241,21 @@ struct LoopPlayerView: NSViewRepresentable {
             if isFadingOut { return }
             isFadingOut = true
             didFadeIn = false
+            let duration = max(0, currentDuration)
+            let currentSeconds = duration > 0
+                ? max(0, player.currentTime().seconds - startOffset).truncatingRemainder(dividingBy: duration)
+                : 0
+            let fadeDuration = duration > 0 ? max(0.05, duration - currentSeconds) : 0.16
 
             if let playerLayer {
                 CATransaction.begin()
-                CATransaction.setAnimationDuration(0.16)
+                CATransaction.setAnimationDuration(fadeDuration)
                 playerLayer.opacity = 0
                 CATransaction.commit()
             }
 
             let startTime = CMTime(seconds: startOffset, preferredTimescale: 600)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self, weak player] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + fadeDuration) { [weak self, weak player] in
                 guard let self, let player, self.isFadingOut else { return }
                 player.pause()
                 player.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero)
@@ -267,11 +271,7 @@ struct LoopPlayerView: NSViewRepresentable {
 
         private func targetVideoSeconds(syncTime: TimeInterval, syncTimeUpdatedAt: Date, duration: TimeInterval) -> TimeInterval {
             guard duration > 0 else { return 0 }
-            let delayed = audioPhaseSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration) - visualPhaseDelay
-            if delayed < 0 {
-                return 0
-            }
-            return delayed.truncatingRemainder(dividingBy: duration)
+            return audioPhaseSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
         }
 
         deinit {

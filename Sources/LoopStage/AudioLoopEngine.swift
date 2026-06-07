@@ -150,7 +150,9 @@ final class AudioLoopEngine {
                 loop.stopFadeRemaining = 0
                 loop.stopFadeTotal = 0
             } else if loop.isPlaying {
-                let fade = stopFadeSampleCount()
+                let length = min(loop.left.count, loop.right.count)
+                let remaining = length > 0 ? length - (loop.playPosition % length) : 0
+                let fade = max(1, remaining)
                 loop.stopFadeRemaining = fade
                 loop.stopFadeTotal = fade
             }
@@ -290,10 +292,11 @@ final class AudioLoopEngine {
                 if loop.playPosition == 0 {
                     loop.hasWrapped = true
                 }
-                if loop.stopFadeTotal > 0, loop.stopFadeRemaining == 0 {
+                if loop.stopFadeTotal > 0, loop.playPosition == 0 {
                     loop.playPosition = 0
                     loop.hasWrapped = false
                     loop.isPlaying = false
+                    loop.stopFadeRemaining = 0
                     loop.stopFadeTotal = 0
                     break
                 }
@@ -377,10 +380,6 @@ final class AudioLoopEngine {
     private func crossfadeSampleCount(for sampleCount: Int) -> Int {
         guard sampleCount > 64 else { return 0 }
         return min(sampleCount / 2, max(8, Int(sampleRate * 0.045)))
-    }
-
-    private func stopFadeSampleCount() -> Int {
-        max(8, Int(sampleRate * 0.16))
     }
 
 }
