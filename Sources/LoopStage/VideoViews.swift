@@ -47,6 +47,7 @@ struct LoopPlayerView: NSViewRepresentable {
     let audioOutputDeviceID: String?
     let playbackClock: LoopPlaybackClock
     let syncTime: TimeInterval
+    let syncTimeUpdatedAt: Date
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -64,6 +65,7 @@ struct LoopPlayerView: NSViewRepresentable {
             audioOutputDeviceID: audioOutputDeviceID,
             playbackClock: playbackClock,
             syncTime: syncTime,
+            syncTimeUpdatedAt: syncTimeUpdatedAt,
             in: view.playerLayer
         )
         return view
@@ -80,6 +82,7 @@ struct LoopPlayerView: NSViewRepresentable {
             audioOutputDeviceID: audioOutputDeviceID,
             playbackClock: playbackClock,
             syncTime: syncTime,
+            syncTimeUpdatedAt: syncTimeUpdatedAt,
             in: nsView.playerLayer
         )
     }
@@ -92,6 +95,7 @@ struct LoopPlayerView: NSViewRepresentable {
         private var looper: AVPlayerLooper?
         private var timeObserver: Any?
         private var wasPlaying = false
+        private var lastSyncCorrection = Date.distantPast
 
         @MainActor
         func configure(
@@ -104,6 +108,7 @@ struct LoopPlayerView: NSViewRepresentable {
             audioOutputDeviceID: String?,
             playbackClock: LoopPlaybackClock,
             syncTime: TimeInterval,
+            syncTimeUpdatedAt: Date,
             in layer: AVPlayerLayer
         ) {
             if currentURL != url || currentStartOffset != startOffset || currentDuration != duration {
@@ -157,7 +162,9 @@ struct LoopPlayerView: NSViewRepresentable {
             playbackClock.setPlaying(slotID: slotID, isPlaying: isPlaying)
             if isPlaying {
                 if !wasPlaying {
-                    syncVideoToClock(syncTime: syncTime, startOffset: startOffset, duration: duration)
+                    syncVideoToClock(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, startOffset: startOffset, duration: duration, force: true)
+                } else {
+                    syncVideoToClock(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, startOffset: startOffset, duration: duration, force: false)
                 }
                 player?.play()
             } else {
@@ -167,15 +174,40 @@ struct LoopPlayerView: NSViewRepresentable {
         }
 
         @MainActor
-        private func syncVideoToClock(syncTime: TimeInterval, startOffset: TimeInterval, duration: TimeInterval) {
+        private func syncVideoToClock(
+            syncTime: TimeInterval,
+            syncTimeUpdatedAt: Date,
+            startOffset: TimeInterval,
+            duration: TimeInterval,
+            force: Bool
+        ) {
             guard let player, duration > 0 else { return }
-            let targetSeconds = syncTime.truncatingRemainder(dividingBy: duration)
-            guard targetSeconds.isFinite else { return }
+            if !force, Date().timeIntervalSince(lastSyncCorrection) < 0.12 {
+                return
+            }
+
+            let targetSeconds = (syncTime + Date().timeIntervalSince(syncTimeUpdatedAt))
+                .truncatingRemainder(dividingBy: duration)
+            guard targetSeconds.isFinite, targetSeconds >= 0 else { return }
+            let currentSeconds = max(0, player.currentTime().seconds - startOffset)
+                .truncatingRemainder(dividingBy: duration)
+            let rawDelta = targetSeconds - currentSeconds
+            let wrappedDelta: TimeInterval
+            if rawDelta > duration / 2 {
+                wrappedDelta = rawDelta - duration
+            } else if rawDelta < -duration / 2 {
+                wrappedDelta = rawDelta + duration
+            } else {
+                wrappedDelta = rawDelta
+            }
+            guard force || abs(wrappedDelta) > 0.04 else { return }
+
             let target = CMTimeAdd(
                 CMTime(seconds: startOffset, preferredTimescale: 600),
                 CMTime(seconds: max(0, targetSeconds), preferredTimescale: 600)
             )
             player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+            lastSyncCorrection = Date()
         }
 
         deinit {

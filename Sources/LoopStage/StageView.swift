@@ -934,7 +934,8 @@ private struct LoopTile: View {
                     isPlaying: slot.isPlaying,
                     audioOutputDeviceID: audioOutputDeviceID,
                     playbackClock: playbackClock,
-                    syncTime: syncTime
+                    syncTime: syncTime,
+                    syncTimeUpdatedAt: syncTimeUpdatedAt
                 )
                     .clipShape(tileShape)
                     .shadow(color: .black.opacity(editMode ? 0 : 0.45), radius: editMode ? 0 : 16, y: editMode ? 0 : 8)
