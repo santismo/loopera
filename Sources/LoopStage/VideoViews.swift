@@ -235,9 +235,12 @@ struct LoopPlayerView: NSViewRepresentable {
             isFadingOut = true
             didFadeIn = false
             let duration = max(0, currentDuration)
-            let currentSeconds = duration > 0
-                ? max(0, player.currentTime().seconds - startOffset).truncatingRemainder(dividingBy: duration)
-                : 0
+            let currentSeconds: TimeInterval
+            if duration > 0, let previousAudioPhase {
+                currentSeconds = previousAudioPhase.truncatingRemainder(dividingBy: duration)
+            } else {
+                currentSeconds = 0
+            }
             let fadeDuration = duration > 0 ? max(0.05, duration - currentSeconds) : 0.16
 
             if let playerLayer {

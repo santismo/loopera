@@ -794,9 +794,10 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
                 ?? assetDuration.map { max(0.25, $0) }
                 ?? Date().timeIntervalSince(pendingStartDate ?? Date())
             let endTrim = completedVideoEndTrims[recordingSlotIndex] ?? 0
-            let startOffset = recordingSlotIndex == 1
+            let rawStartOffset = recordingSlotIndex == 1
                 ? loopStartOffset()
                 : recordingStartOffset() ?? videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
+            let startOffset = correctedVideoStartOffset(rawStartOffset, loopDuration: duration)
             slots[slotPosition].url = outputFileURL
             slots[slotPosition].createdAt = Date()
             slots[slotPosition].startOffset = startOffset
@@ -839,6 +840,12 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
         }
         let offset = pendingStartDate.timeIntervalSince(captureStartDate)
         return offset.isFinite ? max(0, offset) : nil
+    }
+
+    private func correctedVideoStartOffset(_ offset: TimeInterval, loopDuration: TimeInterval) -> TimeInterval {
+        guard offset.isFinite, loopDuration.isFinite, loopDuration > 0 else { return max(0, offset) }
+        let compensation = min(0.12, loopDuration * 0.08)
+        return max(0, offset - compensation)
     }
 
     private func loopStartOffset() -> TimeInterval {
