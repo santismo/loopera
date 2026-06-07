@@ -53,18 +53,17 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
         try prepareWriter(outputURL: outputURL, width: width, height: height)
         lastRecordingURL = outputURL
-        fallbackStartTime = Date()
+        let startTime = Date()
+        fallbackStartTime = startTime
 
-        let timer = DispatchSource.makeTimerSource(queue: sampleQueue)
+        let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now(), repeating: 1.0 / 30.0)
         timer.setEventHandler { [weak self, weak view] in
             guard let self, let view else { return }
-            DispatchQueue.main.async {
-                guard let image = self.snapshot(view: view, width: width, height: height) else { return }
-                let elapsed = Date().timeIntervalSince(self.fallbackStartTime ?? Date())
-                self.sampleQueue.async {
-                    self.appendFallbackFrame(image, time: CMTime(seconds: elapsed, preferredTimescale: 600), width: width, height: height)
-                }
+            guard let image = self.snapshot(view: view, width: width, height: height) else { return }
+            let elapsed = Date().timeIntervalSince(startTime)
+            self.sampleQueue.async {
+                self.appendFallbackFrame(image, time: CMTime(seconds: elapsed, preferredTimescale: 600), width: width, height: height)
             }
         }
         fallbackTimer = timer
