@@ -932,6 +932,7 @@ private struct LoopTile: View {
                     duration: slot.duration,
                     isMuted: true,
                     isPlaying: slot.isPlaying,
+                    isStopping: slot.isStopping,
                     audioOutputDeviceID: audioOutputDeviceID,
                     playbackClock: playbackClock,
                     syncTime: syncTime,

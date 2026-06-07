@@ -44,6 +44,7 @@ struct LoopPlayerView: NSViewRepresentable {
     let duration: TimeInterval
     let isMuted: Bool
     let isPlaying: Bool
+    let isStopping: Bool
     let audioOutputDeviceID: String?
     let playbackClock: LoopPlaybackClock
     let syncTime: TimeInterval
@@ -62,6 +63,7 @@ struct LoopPlayerView: NSViewRepresentable {
             duration: duration,
             isMuted: isMuted,
             isPlaying: isPlaying,
+            isStopping: isStopping,
             audioOutputDeviceID: audioOutputDeviceID,
             playbackClock: playbackClock,
             syncTime: syncTime,
@@ -79,6 +81,7 @@ struct LoopPlayerView: NSViewRepresentable {
             duration: duration,
             isMuted: isMuted,
             isPlaying: isPlaying,
+            isStopping: isStopping,
             audioOutputDeviceID: audioOutputDeviceID,
             playbackClock: playbackClock,
             syncTime: syncTime,
@@ -108,6 +111,7 @@ struct LoopPlayerView: NSViewRepresentable {
             duration: TimeInterval,
             isMuted: Bool,
             isPlaying: Bool,
+            isStopping: Bool,
             audioOutputDeviceID: String?,
             playbackClock: LoopPlaybackClock,
             syncTime: TimeInterval,
@@ -165,14 +169,20 @@ struct LoopPlayerView: NSViewRepresentable {
             player?.audioOutputDeviceUniqueID = audioOutputDeviceID
             playbackClock.setPlaying(slotID: slotID, isPlaying: isPlaying)
             if isPlaying {
-                isFadingOut = false
+                if isStopping {
+                    fadeOutToBoundary()
+                } else {
+                    isFadingOut = false
+                }
                 if !wasPlaying {
                     syncVideoToClock(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, startOffset: startOffset, duration: duration, force: true)
                 } else {
                     syncVideoToClock(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, startOffset: startOffset, duration: duration, force: false)
                 }
                 player?.play()
-                fadeInIfNeeded()
+                if !isStopping {
+                    fadeInIfNeeded()
+                }
             } else {
                 fadeOutAndReset(startOffset: startOffset)
             }
@@ -255,6 +265,27 @@ struct LoopPlayerView: NSViewRepresentable {
                 guard let self, let player, self.isFadingOut else { return }
                 player.pause()
                 player.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+        }
+
+        @MainActor
+        private func fadeOutToBoundary() {
+            guard !isFadingOut else { return }
+            isFadingOut = true
+            didFadeIn = false
+            let duration = max(0, currentDuration)
+            let currentSeconds: TimeInterval
+            if duration > 0, let previousAudioPhase {
+                currentSeconds = previousAudioPhase.truncatingRemainder(dividingBy: duration)
+            } else {
+                currentSeconds = 0
+            }
+            let fadeDuration = duration > 0 ? max(0.05, duration - currentSeconds) : 0.16
+            if let playerLayer {
+                CATransaction.begin()
+                CATransaction.setAnimationDuration(fadeDuration)
+                playerLayer.opacity = 0
+                CATransaction.commit()
             }
         }
 

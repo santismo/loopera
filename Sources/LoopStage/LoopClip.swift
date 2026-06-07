@@ -19,6 +19,7 @@ struct LoopSlot: Identifiable, Equatable {
     var state: LoopSlotState = .empty
     var isMuted = false
     var isPlaying = true
+    var isStopping = false
     var customPosition: CGPointUnit?
     var scale: Double = 1
     var shape: LoopSlotShape = .circle

@@ -43,6 +43,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var quantizeTask: Task<Void, Never>?
     private var reconfigureTask: Task<Void, Never>?
     private var previousMasterPhase: Double?
+    private var previousStoppingPhases: [Int: Double] = [:]
     nonisolated(unsafe) var performanceAudioHandler: ((AudioLoopEngine.InputBuffer, Double, CMTime) -> Void)?
     private nonisolated(unsafe) var audioChannelPairStartForCapture = 0
     private let lastAudioDeviceIDKey = "Loopera.lastAudioDeviceID"
@@ -228,9 +229,21 @@ final class CaptureController: NSObject, ObservableObject {
         }
 
         guard slots[slotPosition].state == .recorded else { return }
-        slots[slotPosition].isPlaying.toggle()
-        audioLoopEngine.setPlaying(slot: selectedSlotIndex, isPlaying: slots[slotPosition].isPlaying)
-        status = slots[slotPosition].isPlaying ? "Slot \(selectedSlotIndex) playing." : "Slot \(selectedSlotIndex) stopped."
+        if slots[slotPosition].isPlaying {
+            guard !slots[slotPosition].isStopping else { return }
+            slots[slotPosition].isStopping = true
+            previousStoppingPhases[selectedSlotIndex] = audioLoopEngine.phase(slot: selectedSlotIndex)
+            audioLoopEngine.setPlaying(slot: selectedSlotIndex, isPlaying: false)
+            status = "Slot \(selectedSlotIndex) fading to loop start."
+        } else {
+            slots[slotPosition].isPlaying = true
+            slots[slotPosition].isStopping = false
+            previousStoppingPhases[selectedSlotIndex] = nil
+            audioLoopEngine.setPlaying(slot: selectedSlotIndex, isPlaying: true)
+            loopPlaybackTimes[selectedSlotIndex] = 0
+            loopPlaybackTimeUpdatedAt = Date()
+            status = "Slot \(selectedSlotIndex) playing."
+        }
     }
 
     func toggleMuteSelected() {
@@ -267,8 +280,10 @@ final class CaptureController: NSObject, ObservableObject {
         slots[slotPosition].state = .empty
         slots[slotPosition].isMuted = false
         slots[slotPosition].isPlaying = true
+        slots[slotPosition].isStopping = false
         audioLoopEngine.clear(slot: number)
         loopPlaybackTimes[number] = nil
+        previousStoppingPhases[number] = nil
         status = "Cleared slot \(number)."
     }
 
@@ -281,9 +296,11 @@ final class CaptureController: NSObject, ObservableObject {
             slots[index].state = .empty
             slots[index].isMuted = false
             slots[index].isPlaying = true
+            slots[index].isStopping = false
         }
         selectedSlotIndex = nil
         loopPlaybackTimes.removeAll()
+        previousStoppingPhases.removeAll()
         audioLoopEngine.clearAll()
         status = "Cleared loops."
     }
@@ -298,11 +315,13 @@ final class CaptureController: NSObject, ObservableObject {
         let shouldPlay = !recordedIndices.contains { slots[$0].isPlaying }
         for index in recordedIndices {
             slots[index].isPlaying = shouldPlay
+            slots[index].isStopping = false
             if shouldPlay {
                 audioLoopEngine.restart(slot: slots[index].index)
                 loopPlaybackTimes[slots[index].index] = 0
             } else {
                 audioLoopEngine.setPlaying(slot: slots[index].index, isPlaying: false)
+                previousStoppingPhases[slots[index].index] = audioLoopEngine.phase(slot: slots[index].index)
             }
         }
         loopPlaybackTimeUpdatedAt = Date()
@@ -703,6 +722,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     private func tick() {
         updateLoopPlaybackTimes()
+        finishStoppingLoopsAtBoundary()
 
         guard let master = slots.first(where: { $0.index == 1 && $0.state == .recorded }), master.duration > 0 else {
             return
@@ -752,6 +772,29 @@ final class CaptureController: NSObject, ObservableObject {
         }
         loopPlaybackTimes = times
         loopPlaybackTimeUpdatedAt = Date()
+    }
+
+    private func finishStoppingLoopsAtBoundary() {
+        for index in slots.indices where slots[index].isStopping {
+            let slotIndex = slots[index].index
+            guard let phase = audioLoopEngine.phase(slot: slotIndex) else {
+                slots[index].isStopping = false
+                slots[index].isPlaying = false
+                previousStoppingPhases[slotIndex] = nil
+                loopPlaybackTimes[slotIndex] = 0
+                continue
+            }
+
+            let previous = previousStoppingPhases[slotIndex] ?? phase
+            if previous > 0.85 && phase < 0.15 {
+                slots[index].isStopping = false
+                slots[index].isPlaying = false
+                previousStoppingPhases[slotIndex] = nil
+                loopPlaybackTimes[slotIndex] = 0
+            } else {
+                previousStoppingPhases[slotIndex] = phase
+            }
+        }
     }
 }
 
@@ -804,6 +847,7 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
             slots[slotPosition].duration = max(0.25, duration)
             slots[slotPosition].state = .recorded
             slots[slotPosition].isPlaying = true
+            slots[slotPosition].isStopping = false
             slots[slotPosition].isMuted = false
             if let phase = audioLoopEngine.phase(slot: recordingSlotIndex) {
                 loopPlaybackTimes[recordingSlotIndex] = phase * slots[slotPosition].duration
@@ -844,7 +888,7 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
 
     private func correctedVideoStartOffset(_ offset: TimeInterval, loopDuration: TimeInterval) -> TimeInterval {
         guard offset.isFinite, loopDuration.isFinite, loopDuration > 0 else { return max(0, offset) }
-        let compensation = min(0.12, loopDuration * 0.08)
+        let compensation = min(0.28, loopDuration * 0.12)
         return max(0, offset - compensation)
     }
 
