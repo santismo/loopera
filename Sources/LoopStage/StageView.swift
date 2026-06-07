@@ -529,11 +529,16 @@ struct StageView: View {
             capture.applyDevicePreset(
                 videoDeviceID: preset.selectedVideoDeviceID,
                 audioDeviceIDs: preset.selectedAudioDeviceIDs,
-                audioChannelPairStart: preset.selectedAudioChannelPairStart
+                audioChannelPairStart: preset.selectedAudioChannelPairStart,
+                refresh: false
             )
-            output.refresh()
             if let outputID = preset.selectedAudioOutputDeviceID {
-                output.select(outputID)
+                if output.devices.contains(where: { $0.id == outputID }) {
+                    output.select(outputID)
+                } else {
+                    output.refresh()
+                    output.select(outputID)
+                }
             } else {
                 output.selectSystemOutput()
             }

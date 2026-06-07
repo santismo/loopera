@@ -409,8 +409,10 @@ final class CaptureController: NSObject, ObservableObject {
         status = "Loaded slot layout."
     }
 
-    func applyDevicePreset(videoDeviceID: String, audioDeviceIDs: [String], audioChannelPairStart: Int?) {
-        refreshDevices()
+    func applyDevicePreset(videoDeviceID: String, audioDeviceIDs: [String], audioChannelPairStart: Int?, refresh: Bool = true) {
+        if refresh {
+            refreshDevices()
+        }
         if videoDevices.contains(where: { $0.uniqueID == videoDeviceID }) {
             selectedDeviceID = videoDeviceID
         }
@@ -425,7 +427,7 @@ final class CaptureController: NSObject, ObservableObject {
             UserDefaults.standard.set(selectedAudioID, forKey: lastAudioDeviceIDKey)
         }
         if isConfigured {
-            scheduleSessionReconfigure()
+            scheduleSessionReconfigure(delayMilliseconds: refresh ? 450 : 80)
         }
     }
 
@@ -684,10 +686,10 @@ final class CaptureController: NSObject, ObservableObject {
         }
     }
 
-    private func scheduleSessionReconfigure() {
+    private func scheduleSessionReconfigure(delayMilliseconds: Int = 450) {
         reconfigureTask?.cancel()
         reconfigureTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(450))
+            try? await Task.sleep(for: .milliseconds(delayMilliseconds))
             await MainActor.run {
                 guard let self else { return }
                 self.configureSession()

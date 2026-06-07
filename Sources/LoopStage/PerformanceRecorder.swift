@@ -52,8 +52,18 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private func startFallbackViewCapture(view: NSView?) throws {
         guard let view else { throw RecorderError.noStageView }
         let scale = view.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        let width = max(640, Int(view.bounds.width * scale))
-        let height = max(360, Int(view.bounds.height * scale))
+        let baseWidth = max(640, Int(view.bounds.width * scale))
+        let baseHeight = max(360, Int(view.bounds.height * scale))
+        let stageAspect = max(1, view.bounds.width) / max(1, view.bounds.height)
+        let width: Int
+        let height: Int
+        if stageAspect >= 1 {
+            width = Self.even(max(baseWidth, 1920))
+            height = Self.even(max(baseHeight, Int(Double(width) / Double(stageAspect))))
+        } else {
+            height = Self.even(max(baseHeight, 1920))
+            width = Self.even(max(baseWidth, Int(Double(height) * Double(stageAspect))))
+        }
         let outputURL = Self.recordingsDirectory
             .appendingPathComponent("Loopera-Performance-\(Self.timestamp())")
             .appendingPathExtension("mov")
@@ -82,7 +92,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         isFinishing = false
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
-        let targetBitrate = max(20_000_000, width * height * 12)
+        let targetBitrate = max(80_000_000, width * height * 32)
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
@@ -91,6 +101,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
                 AVVideoAverageBitRateKey: targetBitrate,
                 AVVideoExpectedSourceFrameRateKey: 60,
                 AVVideoMaxKeyFrameIntervalKey: 60,
+                AVVideoMaxKeyFrameIntervalDurationKey: 1,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
                 AVVideoAllowFrameReorderingKey: false
             ]
@@ -217,6 +228,10 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         return formatter.string(from: Date())
     }
 
+    nonisolated private static func even(_ value: Int) -> Int {
+        value % 2 == 0 ? value : value + 1
+    }
+
     nonisolated static var recordingsDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Loopera", isDirectory: true)
@@ -300,6 +315,7 @@ extension PerformanceRecorder {
         ) {
             context.setFillColor(NSColor.black.cgColor)
             context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            context.interpolationQuality = .high
             context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         }
         CVPixelBufferUnlockBaseAddress(buffer, [])
