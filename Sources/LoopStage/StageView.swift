@@ -218,6 +218,12 @@ struct StageView: View {
                         Image(systemName: metronome.isMuted ? "speaker.slash" : "speaker.wave.2")
                     }
                     .help("Mute metronome (K)")
+                    Slider(value: $metronome.volume, in: 0...1)
+                        .frame(width: 64)
+                        .onChange(of: metronome.volume) {
+                            metronome.applyVolume()
+                        }
+                        .help("Metronome volume")
                     Button {
                         capture.detectTempoFromMaster()
                         if let tempo = capture.tempoBPM {

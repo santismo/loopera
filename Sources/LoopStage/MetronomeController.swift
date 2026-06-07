@@ -4,6 +4,7 @@ import Foundation
 private final class MetronomeRenderState {
     var bpm: Double = 120
     var isMuted = false
+    var volume: Double = 0.45
     var sampleRate: Double = 48_000
     var samplePosition: Int64 = 0
 
@@ -24,7 +25,7 @@ private final class MetronomeRenderState {
             let beatPosition = Int((samplePosition + Int64(frame)) % Int64(beatSamples))
             guard beatPosition < clickSamples else { continue }
             let envelope = Float(1 - Double(beatPosition) / Double(clickSamples))
-            let sample = sin(Float(beatPosition) * 0.38) * 0.45 * envelope
+            let sample = sin(Float(beatPosition) * 0.38) * Float(max(0, min(1, volume))) * envelope
             for buffer in abl {
                 guard let data = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
                 data[frame] += sample
@@ -34,11 +35,19 @@ private final class MetronomeRenderState {
     }
 }
 
+private func makeMetronomeSourceNode(renderState: MetronomeRenderState) -> AVAudioSourceNode {
+    AVAudioSourceNode { _, _, frameCount, audioBufferList -> OSStatus in
+        renderState.render(frameCount: Int(frameCount), audioBufferList: audioBufferList)
+        return noErr
+    }
+}
+
 @MainActor
 final class MetronomeController: ObservableObject {
     @Published var bpm: Double = 120
     @Published private(set) var isPlaying = false
     @Published var isMuted = false
+    @Published var volume: Double = 0.45
 
     private let engine = AVAudioEngine()
     private let renderState = MetronomeRenderState()
@@ -55,6 +64,7 @@ final class MetronomeController: ObservableObject {
     func play() {
         renderState.bpm = max(20, min(300, bpm))
         renderState.isMuted = isMuted
+        renderState.volume = volume
         renderState.samplePosition = 0
         if !engine.isRunning {
             do {
@@ -77,6 +87,10 @@ final class MetronomeController: ObservableObject {
         renderState.isMuted = isMuted
     }
 
+    func applyVolume() {
+        renderState.volume = max(0, min(1, volume))
+    }
+
     func applyTempo() {
         renderState.bpm = max(20, min(300, bpm))
     }
@@ -85,11 +99,7 @@ final class MetronomeController: ObservableObject {
         let hardwareFormat = engine.outputNode.outputFormat(forBus: 0)
         renderState.sampleRate = hardwareFormat.sampleRate > 0 ? hardwareFormat.sampleRate : 48_000
         let format = AVAudioFormat(standardFormatWithSampleRate: renderState.sampleRate, channels: 2) ?? hardwareFormat
-        let renderState = renderState
-        let node = AVAudioSourceNode { _, _, frameCount, audioBufferList -> OSStatus in
-            renderState.render(frameCount: Int(frameCount), audioBufferList: audioBufferList)
-            return noErr
-        }
+        let node = makeMetronomeSourceNode(renderState: renderState)
         sourceNode = node
         engine.attach(node)
         engine.connect(node, to: engine.mainMixerNode, format: format)
