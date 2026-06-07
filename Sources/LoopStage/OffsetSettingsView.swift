@@ -30,7 +30,8 @@ struct OffsetSettingsView: View {
                         }
                     }
                     .labelsHidden()
-                    .frame(width: 160)
+                    .pickerStyle(.segmented)
+                    .frame(width: 230)
                 }
             }
 
@@ -53,7 +54,7 @@ struct OffsetSettingsView: View {
             }
         }
         .padding(18)
-        .frame(width: 380)
+        .frame(width: 450)
     }
 
     private func numberRow(_ title: String, value: Binding<Double>) -> some View {

@@ -45,6 +45,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var reconfigureTask: Task<Void, Never>?
     private var previousMasterPhase: Double?
     private var previousStoppingPhases: [Int: Double] = [:]
+    private var lastPlaybackPublishDate = Date.distantPast
     nonisolated(unsafe) var performanceAudioHandler: ((AudioLoopEngine.InputBuffer, Double, CMTime) -> Void)?
     private nonisolated(unsafe) var audioChannelPairStartForCapture = 0
     private let lastAudioDeviceIDKey = "Loopera.lastAudioDeviceID"
@@ -749,7 +750,7 @@ final class CaptureController: NSObject, ObservableObject {
     }
 
     private func tick() {
-        updateLoopPlaybackTimes()
+        updateLoopPlaybackTimesIfNeeded()
         finishStoppingLoopsAtBoundary()
 
         guard let master = slots.first(where: { $0.index == 1 && $0.state == .recorded }), master.duration > 0 else {
@@ -791,7 +792,10 @@ final class CaptureController: NSObject, ObservableObject {
         return previousMasterPhase > 0.85 && currentPhase < 0.15
     }
 
-    private func updateLoopPlaybackTimes() {
+    private func updateLoopPlaybackTimesIfNeeded(force: Bool = false) {
+        let now = Date()
+        guard force || now.timeIntervalSince(lastPlaybackPublishDate) >= 1.0 / 30.0 else { return }
+        lastPlaybackPublishDate = now
         var times: [Int: TimeInterval] = [:]
         for slot in slots where slot.state == .recorded && slot.duration > 0 {
             if let phase = audioLoopEngine.phase(slot: slot.index) {
@@ -799,7 +803,7 @@ final class CaptureController: NSObject, ObservableObject {
             }
         }
         loopPlaybackTimes = times
-        loopPlaybackTimeUpdatedAt = Date()
+        loopPlaybackTimeUpdatedAt = now
     }
 
     private func finishStoppingLoopsAtBoundary() {
@@ -870,11 +874,10 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
             let endTrim = completedVideoEndTrims[recordingSlotIndex] ?? 0
             let startOffset: TimeInterval
             if recordingSlotIndex == 1 {
-                startOffset = applyVideoOffset(await detectedMediaAudioStartOffset(for: outputFileURL) ?? loopStartOffset())
+                startOffset = await detectedMediaAudioStartOffset(for: outputFileURL) ?? loopStartOffset()
             } else {
-                startOffset = applyVideoOffset(recordingStartOffset()
+                startOffset = recordingStartOffset()
                     ?? videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
-                )
             }
             slots[slotPosition].url = outputFileURL
             slots[slotPosition].createdAt = Date()
@@ -917,10 +920,6 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
         }
         let multiple = max(1, Int((duration / masterDuration).rounded()))
         return Double(multiple) * masterDuration
-    }
-
-    private func applyVideoOffset(_ offset: TimeInterval) -> TimeInterval {
-        max(0, offset + offsetProfile.videoStartOffsetMilliseconds / 1000)
     }
 
     private func detectedMediaAudioStartOffset(for url: URL) async -> TimeInterval? {

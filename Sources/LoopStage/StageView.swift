@@ -1065,7 +1065,7 @@ private struct LoopTile: View {
                 LoopPlayerView(
                     url: url,
                     slotID: slot.id,
-                    startOffset: slot.startOffset,
+                    startOffset: effectiveVideoStartOffset,
                     duration: slot.duration,
                     isMuted: true,
                     isPlaying: slot.isPlaying,
@@ -1077,7 +1077,6 @@ private struct LoopTile: View {
                 )
                     .clipShape(tileShape)
                     .shadow(color: .black.opacity(editMode ? 0 : 0.45), radius: editMode ? 0 : 16, y: editMode ? 0 : 8)
-                    .opacity(videoOpacity)
             } else {
                 tileShape
                     .fill(editMode ? .white.opacity(0.045) : .clear)
@@ -1095,26 +1094,8 @@ private struct LoopTile: View {
         .aspectRatio(1, contentMode: .fit)
     }
 
-    private var videoOpacity: Double {
-        guard slot.state == .recorded else { return 1 }
-        guard slot.isPlaying else { return 0 }
-        guard slot.isStopping, slot.duration > 0 else { return 1 }
-        if offsetProfile.loopFadeMode != .toLoopEnd, let startedAt = slot.stoppingStartedAt {
-            let fadeDuration: TimeInterval
-            switch offsetProfile.loopFadeMode {
-            case .fast:
-                fadeDuration = 0.08
-            case .slow:
-                fadeDuration = max(0.01, offsetProfile.loopFadeOutMilliseconds / 1000)
-            case .toLoopEnd:
-                fadeDuration = slot.duration
-            }
-            return max(0, min(1, 1 - Date().timeIntervalSince(startedAt) / fadeDuration))
-        }
-        let phase = (syncTime + Date().timeIntervalSince(syncTimeUpdatedAt))
-            .truncatingRemainder(dividingBy: slot.duration)
-        let remaining = max(0, slot.duration - phase)
-        return max(0, min(1, remaining / slot.duration))
+    private var effectiveVideoStartOffset: TimeInterval {
+        max(0, slot.startOffset + offsetProfile.videoStartOffsetMilliseconds / 1000)
     }
 
     private var ringColor: Color? {
