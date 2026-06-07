@@ -837,10 +837,11 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
                 ?? assetDuration.map { max(0.25, $0) }
                 ?? Date().timeIntervalSince(pendingStartDate ?? Date())
             let endTrim = completedVideoEndTrims[recordingSlotIndex] ?? 0
-            let rawStartOffset = recordingSlotIndex == 1
-                ? loopStartOffset()
-                : recordingStartOffset() ?? videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
-            let startOffset = correctedVideoStartOffset(rawStartOffset, loopDuration: duration)
+            let mediaAudioStartOffset = await detectedMediaAudioStartOffset(for: outputFileURL)
+            let startOffset = mediaAudioStartOffset
+                ?? (recordingSlotIndex == 1
+                    ? loopStartOffset()
+                    : recordingStartOffset() ?? videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim))
             slots[slotPosition].url = outputFileURL
             slots[slotPosition].createdAt = Date()
             slots[slotPosition].startOffset = startOffset
@@ -870,6 +871,70 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
         }
     }
 
+    private func detectedMediaAudioStartOffset(for url: URL) async -> TimeInterval? {
+        let asset = AVURLAsset(url: url)
+        do {
+            guard let audioTrack = try await asset.loadTracks(withMediaType: .audio).first else {
+                return nil
+            }
+            let reader = try AVAssetReader(asset: asset)
+            let output = AVAssetReaderTrackOutput(
+                track: audioTrack,
+                outputSettings: [
+                    AVFormatIDKey: kAudioFormatLinearPCM,
+                    AVLinearPCMIsFloatKey: true,
+                    AVLinearPCMBitDepthKey: 32,
+                    AVLinearPCMIsNonInterleaved: false
+                ]
+            )
+            guard reader.canAdd(output) else { return nil }
+            reader.add(output)
+            guard reader.startReading() else { return nil }
+
+            let thresholdValue = Float(threshold)
+            while let sampleBuffer = output.copyNextSampleBuffer() {
+                guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+                      let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)
+                else { continue }
+                let asbd = streamDescription.pointee
+                let channels = max(1, Int(asbd.mChannelsPerFrame))
+                let sampleRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 48_000
+                let presentationTime = sampleBuffer.presentationTimeStamp.seconds
+                var blockBuffer: CMBlockBuffer?
+                var audioBufferList = AudioBufferList()
+                let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                    sampleBuffer,
+                    bufferListSizeNeededOut: nil,
+                    bufferListOut: &audioBufferList,
+                    bufferListSize: MemoryLayout<AudioBufferList>.size,
+                    blockBufferAllocator: kCFAllocatorDefault,
+                    blockBufferMemoryAllocator: kCFAllocatorDefault,
+                    flags: 0,
+                    blockBufferOut: &blockBuffer
+                )
+                guard status == noErr,
+                      let data = audioBufferList.mBuffers.mData?.assumingMemoryBound(to: Float.self)
+                else { continue }
+
+                let floatCount = Int(audioBufferList.mBuffers.mDataByteSize) / MemoryLayout<Float>.size
+                let frameCount = floatCount / channels
+                for frame in 0..<frameCount {
+                    var peak: Float = 0
+                    for channel in 0..<channels {
+                        peak = max(peak, abs(data[frame * channels + channel]))
+                    }
+                    if peak >= thresholdValue {
+                        let detected = presentationTime + Double(frame) / sampleRate - thresholdLeadMilliseconds / 1000
+                        return max(0, detected)
+                    }
+                }
+            }
+        } catch {
+            return nil
+        }
+        return nil
+    }
+
     private func videoStartOffset(assetDuration: TimeInterval?, loopDuration: TimeInterval, endTrim: TimeInterval) -> TimeInterval {
         guard let assetDuration, assetDuration.isFinite, assetDuration > 0, loopDuration.isFinite, loopDuration > 0 else {
             return 0
@@ -884,12 +949,6 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
         }
         let offset = pendingStartDate.timeIntervalSince(captureStartDate)
         return offset.isFinite ? max(0, offset) : nil
-    }
-
-    private func correctedVideoStartOffset(_ offset: TimeInterval, loopDuration: TimeInterval) -> TimeInterval {
-        guard offset.isFinite, loopDuration.isFinite, loopDuration > 0 else { return max(0, offset) }
-        let compensation = min(0.28, loopDuration * 0.12)
-        return max(0, offset - compensation)
     }
 
     private func loopStartOffset() -> TimeInterval {

@@ -169,8 +169,9 @@ struct LoopPlayerView: NSViewRepresentable {
             player?.audioOutputDeviceUniqueID = audioOutputDeviceID
             playbackClock.setPlaying(slotID: slotID, isPlaying: isPlaying)
             if isPlaying {
+                let currentAudioPhase = audioPhaseSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
                 if isStopping {
-                    fadeOutToBoundary()
+                    fadeOutToBoundary(currentSeconds: currentAudioPhase)
                 } else {
                     isFadingOut = false
                 }
@@ -269,17 +270,11 @@ struct LoopPlayerView: NSViewRepresentable {
         }
 
         @MainActor
-        private func fadeOutToBoundary() {
+        private func fadeOutToBoundary(currentSeconds: TimeInterval) {
             guard !isFadingOut else { return }
             isFadingOut = true
             didFadeIn = false
             let duration = max(0, currentDuration)
-            let currentSeconds: TimeInterval
-            if duration > 0, let previousAudioPhase {
-                currentSeconds = previousAudioPhase.truncatingRemainder(dividingBy: duration)
-            } else {
-                currentSeconds = 0
-            }
             let fadeDuration = duration > 0 ? max(0.05, duration - currentSeconds) : 0.16
             if let playerLayer {
                 CATransaction.begin()
