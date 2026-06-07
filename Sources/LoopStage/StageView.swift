@@ -9,6 +9,8 @@ struct StageView: View {
     @State private var layout: StageLayout = .clock
     @State private var editMode = false
     @State private var canvasScale = 1.0
+    @State private var livePreviewZoom = 1.0
+    @State private var livePreviewShape: LoopSlotShape = .roundedSquare
     @State private var dragPositions: [UUID: CGPointUnit] = [:]
 
     var body: some View {
@@ -19,10 +21,7 @@ struct StageView: View {
                 ZStack {
                     Color(red: 0.045, green: 0.048, blue: 0.052)
 
-                    CameraPreview(session: capture.session)
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .scaleEffect(canvasScale)
-                        .padding(stagePadding(for: proxy.size))
+                    livePreview(in: proxy.size)
 
                     loopLayer(in: proxy.size)
                 }
@@ -214,7 +213,8 @@ struct StageView: View {
             }
 
             if editMode {
-                HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
                     Button {
                         capture.deleteSelected()
                     } label: {
@@ -253,11 +253,20 @@ struct StageView: View {
                     }
                     .pickerStyle(.segmented)
                     .frame(width: 170)
+                    }
 
+                    HStack(spacing: 12) {
                     HStack(spacing: 7) {
-                        Text("Canvas")
+                        Text("Live Size")
                             .font(.system(size: 11, weight: .medium))
                         Slider(value: $canvasScale, in: 0.65...1.35)
+                            .frame(width: 160)
+                    }
+
+                    HStack(spacing: 7) {
+                        Text("Live Zoom")
+                            .font(.system(size: 11, weight: .medium))
+                        Slider(value: $livePreviewZoom, in: 1...2.5)
                             .frame(width: 160)
                     }
 
@@ -273,10 +282,21 @@ struct StageView: View {
                         )
                         .frame(width: 160)
                     }
+                    }
 
-                    Text("Drag slot rings on the stage.")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.6))
+                    HStack(spacing: 12) {
+                        Picker("Live Shape", selection: $livePreviewShape) {
+                            ForEach(LoopSlotShape.allCases) { shape in
+                                Text(shape.rawValue).tag(shape)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 260)
+
+                        Text("Drag slot rings on the stage.")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
                 }
             }
         }
@@ -361,6 +381,8 @@ struct StageView: View {
             selectedAudioOutputDeviceID: output.selectedDeviceID,
             stageLayout: layout,
             canvasScale: canvasScale,
+            livePreviewZoom: livePreviewZoom,
+            livePreviewShape: livePreviewShape,
             threshold: capture.threshold,
             thresholdLeadMilliseconds: capture.thresholdLeadMilliseconds,
             tempoBPM: capture.tempoBPM,
@@ -382,6 +404,8 @@ struct StageView: View {
             let preset = try JSONDecoder().decode(LayoutPreset.self, from: data)
             layout = preset.stageLayout
             canvasScale = preset.canvasScale
+            livePreviewZoom = preset.livePreviewZoom ?? 1
+            livePreviewShape = preset.livePreviewShape ?? .roundedSquare
             capture.threshold = preset.threshold
             capture.thresholdLeadMilliseconds = preset.thresholdLeadMilliseconds ?? capture.thresholdLeadMilliseconds
             capture.tempoBPM = preset.tempoBPM
@@ -523,6 +547,28 @@ struct StageView: View {
         case .listening, .armed, .recording, .recorded:
             return .black.opacity(0.88)
         }
+    }
+
+    @ViewBuilder
+    private func livePreview(in size: CGSize) -> some View {
+        let padding = stagePadding(for: size)
+        let width = max(120, (size.width - padding * 2) * canvasScale)
+        let height = max(90, (size.height - padding * 2) * canvasScale)
+
+        ZStack {
+            CameraPreview(session: capture.session)
+                .scaleEffect(livePreviewZoom)
+                .frame(width: width, height: height)
+        }
+        .frame(width: width, height: height)
+        .clipShape(stageShape(livePreviewShape))
+        .overlay {
+            if editMode {
+                stageShape(livePreviewShape)
+                    .stroke(.white.opacity(0.28), lineWidth: 2)
+            }
+        }
+        .position(x: size.width / 2, y: size.height / 2)
     }
 
     @ViewBuilder
@@ -712,6 +758,21 @@ struct StageView: View {
             CGPoint(x: inset, y: size.height * 0.25)
         ]
         return points[index % points.count]
+    }
+
+    private func stageShape(_ shape: LoopSlotShape) -> AnyShape {
+        switch shape {
+        case .circle:
+            AnyShape(Circle())
+        case .roundedSquare:
+            AnyShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        case .capsule:
+            AnyShape(Capsule())
+        case .diamond:
+            AnyShape(DiamondShape())
+        case .hexagon:
+            AnyShape(HexagonShape())
+        }
     }
 }
 

@@ -7,6 +7,8 @@ struct LayoutPreset: Codable {
     var selectedAudioOutputDeviceID: String?
     var stageLayout: StageLayout
     var canvasScale: Double
+    var livePreviewZoom: Double?
+    var livePreviewShape: LoopSlotShape?
     var threshold: Double
     var thresholdLeadMilliseconds: Double?
     var tempoBPM: Double?
