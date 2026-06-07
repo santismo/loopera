@@ -16,10 +16,12 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var didStartSession = false
     private var isFinishing = false
+    private var fallbackTimer: DispatchSourceTimer?
+    private var fallbackStartTime: Date?
     private let sampleQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.samples")
 
     @MainActor
-    func start(microphoneDeviceID: String?) {
+    func start(microphoneDeviceID: String?, fallbackView: NSView?) {
         guard !isRecording else { return }
         status = "Preparing window recorder..."
 
@@ -31,9 +33,15 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
                     status = "Recording performance."
                 }
             } catch {
-                await stop()
                 await MainActor.run {
-                    status = "Program recording failed: \(error.localizedDescription)"
+                    do {
+                        try startFallbackViewCapture(view: fallbackView)
+                        isRecording = true
+                        status = "Recording performance video."
+                    } catch {
+                        Task { await stop() }
+                        status = "Performance recording failed: \(error.localizedDescription)"
+                    }
                 }
             }
         }
@@ -45,6 +53,8 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         stream = nil
         isRecording = false
         status = "Finishing program recording..."
+        fallbackTimer?.cancel()
+        fallbackTimer = nil
 
         do {
             try await activeStream?.stopCapture()
@@ -53,6 +63,36 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         }
 
         await finishWriter()
+    }
+
+    @MainActor
+    private func startFallbackViewCapture(view: NSView?) throws {
+        guard let view else { throw RecorderError.noStageView }
+        let scale = view.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let width = max(640, Int(view.bounds.width * scale))
+        let height = max(360, Int(view.bounds.height * scale))
+        let outputURL = Self.recordingsDirectory
+            .appendingPathComponent("Loopera-Performance-\(Self.timestamp())")
+            .appendingPathExtension("mov")
+
+        try prepareWriter(outputURL: outputURL, width: width, height: height, includesAppAudio: false, includesMicrophone: false)
+        lastRecordingURL = outputURL
+        fallbackStartTime = Date()
+
+        let timer = DispatchSource.makeTimerSource(queue: sampleQueue)
+        timer.schedule(deadline: .now(), repeating: 1.0 / 30.0)
+        timer.setEventHandler { [weak self, weak view] in
+            guard let self, let view else { return }
+            DispatchQueue.main.async {
+                guard let image = self.snapshot(view: view, width: width, height: height) else { return }
+                let elapsed = Date().timeIntervalSince(self.fallbackStartTime ?? Date())
+                self.sampleQueue.async {
+                    self.appendFallbackFrame(image, time: CMTime(seconds: elapsed, preferredTimescale: 600), width: width, height: height)
+                }
+            }
+        }
+        fallbackTimer = timer
+        timer.resume()
     }
 
     private func startCaptureWithFallbacks(microphoneDeviceID: String?) async throws {
@@ -94,7 +134,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             .appendingPathComponent("Loopera-Performance-\(Self.timestamp())")
             .appendingPathExtension("mov")
 
-        try prepareWriter(outputURL: outputURL, width: width, height: height, includesMicrophone: captureMicrophone)
+        try prepareWriter(outputURL: outputURL, width: width, height: height, includesAppAudio: true, includesMicrophone: captureMicrophone)
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let scWindow = content.windows.first(where: { candidate in
@@ -131,7 +171,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         lastRecordingURL = outputURL
     }
 
-    private func prepareWriter(outputURL: URL, width: Int, height: Int, includesMicrophone: Bool) throws {
+    private func prepareWriter(outputURL: URL, width: Int, height: Int, includesAppAudio: Bool = true, includesMicrophone: Bool) throws {
         didStartSession = false
         isFinishing = false
 
@@ -174,7 +214,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         if writer.canAdd(videoInput) {
             writer.add(videoInput)
         }
-        if writer.canAdd(appAudioInput) {
+        if includesAppAudio, writer.canAdd(appAudioInput) {
             writer.add(appAudioInput)
         }
         if includesMicrophone, writer.canAdd(microphoneInput) {
@@ -187,7 +227,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
         self.writer = writer
         self.videoInput = videoInput
-        self.appAudioInput = appAudioInput
+        self.appAudioInput = includesAppAudio ? appAudioInput : nil
         self.microphoneInput = includesMicrophone ? microphoneInput : nil
         self.pixelBufferAdaptor = adaptor
     }
@@ -202,6 +242,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             self.pixelBufferAdaptor = nil
             self.didStartSession = false
             self.isFinishing = false
+            self.fallbackStartTime = nil
         }
     }
 
@@ -300,6 +341,60 @@ extension PerformanceRecorder: SCStreamOutput {
         pixelBufferAdaptor.append(imageBuffer, withPresentationTime: presentationTime)
     }
 
+    @MainActor
+    private func snapshot(view: NSView, width: Int, height: Int) -> CGImage? {
+        let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )
+        guard let bitmap else { return nil }
+        bitmap.size = view.bounds.size
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        return bitmap.cgImage
+    }
+
+    private func appendFallbackFrame(_ image: CGImage, time: CMTime, width: Int, height: Int) {
+        guard
+            let writer,
+            let videoInput,
+            let pixelBufferAdaptor,
+            videoInput.isReadyForMoreMediaData,
+            let pool = pixelBufferAdaptor.pixelBufferPool
+        else { return }
+
+        if !didStartSession {
+            writer.startSession(atSourceTime: .zero)
+            didStartSession = true
+        }
+
+        var buffer: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) == kCVReturnSuccess, let buffer else { return }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        if let context = CGContext(
+            data: CVPixelBufferGetBaseAddress(buffer),
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) {
+            context.setFillColor(NSColor.black.cgColor)
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        pixelBufferAdaptor.append(buffer, withPresentationTime: time)
+    }
+
     private func appendAppAudio(_ sampleBuffer: CMSampleBuffer) {
         guard didStartSession, let appAudioInput, appAudioInput.isReadyForMoreMediaData else { return }
         appAudioInput.append(sampleBuffer)
@@ -314,6 +409,7 @@ extension PerformanceRecorder: SCStreamOutput {
 private enum RecorderError: LocalizedError {
     case noWindow
     case noShareableWindow
+    case noStageView
     case writerStartFailed
     case captureStartFailed(String)
 
@@ -323,6 +419,8 @@ private enum RecorderError: LocalizedError {
             return "No visible Loopera window was found."
         case .noShareableWindow:
             return "Loopera could not find its own window in ScreenCaptureKit."
+        case .noStageView:
+            return "Loopera could not find the stage view to record."
         case .writerStartFailed:
             return "The movie writer could not start."
         case .captureStartFailed(let detail):

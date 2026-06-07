@@ -14,6 +14,7 @@ struct StageView: View {
     @State private var dragPositions: [UUID: CGPointUnit] = [:]
     @State private var layoutName = "Default"
     @State private var savedLayoutNames: [String] = []
+    @State private var stageCaptureView: NSView?
     @FocusState private var layoutNameFocused: Bool
 
     var body: some View {
@@ -32,6 +33,10 @@ struct StageView: View {
                         editControlsOverlay
                             .padding(12)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    }
+
+                    StageCaptureView { view in
+                        stageCaptureView = view
                     }
                 }
                 .coordinateSpace(name: "stage")
@@ -200,7 +205,7 @@ struct StageView: View {
                     if performance.isRecording {
                         Task { await performance.stop() }
                     } else {
-                        performance.start(microphoneDeviceID: capture.selectedAudioDeviceIDs.first)
+                        performance.start(microphoneDeviceID: capture.selectedAudioDeviceIDs.first, fallbackView: stageCaptureView)
                     }
                 } label: {
                     Label(performance.isRecording ? "Stop Performance" : "Record Performance", systemImage: "rectangle.dashed.badge.record")
@@ -1173,6 +1178,28 @@ private struct KeyEventMonitor: NSViewRepresentable {
         deinit {
             if let monitor {
                 NSEvent.removeMonitor(monitor)
+            }
+        }
+    }
+}
+
+private struct StageCaptureView: NSViewRepresentable {
+    let onResolve: (NSView) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            if let container = view.superview {
+                onResolve(container)
+            }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            if let container = nsView.superview {
+                onResolve(container)
             }
         }
     }
