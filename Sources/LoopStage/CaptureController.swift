@@ -23,6 +23,7 @@ final class CaptureController: NSObject, ObservableObject {
     @Published var crossfadeMilliseconds: Double = 35
     @Published private(set) var loopPlaybackTimes: [Int: TimeInterval] = [:]
     @Published private(set) var loopPlaybackTimeUpdatedAt = Date()
+    @Published private(set) var videoFormatStatus = ""
 
     private let movieOutput = AVCaptureMovieFileOutput()
     private let audioMeterOutput = AVCaptureAudioDataOutput()
@@ -535,13 +536,20 @@ final class CaptureController: NSObject, ObservableObject {
     private func configureSession() {
         session.stopRunning()
         session.beginConfiguration()
-        session.sessionPreset = .medium
+        if session.canSetSessionPreset(.hd4K3840x2160) {
+            session.sessionPreset = .hd4K3840x2160
+        } else if session.canSetSessionPreset(.hd1920x1080) {
+            session.sessionPreset = .hd1920x1080
+        } else {
+            session.sessionPreset = .high
+        }
         session.inputs.forEach { session.removeInput($0) }
         session.outputs.forEach { session.removeOutput($0) }
 
         do {
             let videoDevice = videoDevices.first(where: { $0.uniqueID == selectedDeviceID }) ?? videoDevices.first
             if let videoDevice {
+                configureBestVideoFormat(for: videoDevice)
                 let videoInput = try AVCaptureDeviceInput(device: videoDevice)
                 if session.canAddInput(videoInput) {
                     session.addInput(videoInput)
@@ -574,11 +582,51 @@ final class CaptureController: NSObject, ObservableObject {
             if status.hasPrefix("Skipped") || status.hasPrefix("Could not add") {
                 return
             }
-            status = "Ready. \(audioDeviceStatus)"
+            status = "Ready. \(audioDeviceStatus) \(videoFormatStatus)"
         } catch {
             session.commitConfiguration()
             status = "Capture setup failed: \(error.localizedDescription)"
         }
+    }
+
+    private func configureBestVideoFormat(for device: AVCaptureDevice) {
+        guard let bestFormat = bestVideoFormat(for: device) else {
+            videoFormatStatus = ""
+            return
+        }
+
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            device.activeFormat = bestFormat.format
+            let frameRate = min(60, bestFormat.maxFrameRate)
+            if frameRate > 0 {
+                let frameDuration = CMTime(value: 1, timescale: CMTimeScale(Int32(frameRate.rounded())))
+                device.activeVideoMinFrameDuration = frameDuration
+                device.activeVideoMaxFrameDuration = frameDuration
+            }
+            videoFormatStatus = "Video: \(bestFormat.width)x\(bestFormat.height) @ \(Int(bestFormat.maxFrameRate.rounded())) fps."
+        } catch {
+            videoFormatStatus = "Could not set best camera format."
+        }
+    }
+
+    private func bestVideoFormat(for device: AVCaptureDevice) -> (format: AVCaptureDevice.Format, width: Int32, height: Int32, maxFrameRate: Double)? {
+        device.formats
+            .compactMap { format -> (format: AVCaptureDevice.Format, width: Int32, height: Int32, maxFrameRate: Double)? in
+                let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                let maxFrameRate = format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
+                guard dimensions.width > 0, dimensions.height > 0, maxFrameRate >= 24 else { return nil }
+                return (format, dimensions.width, dimensions.height, maxFrameRate)
+            }
+            .max { lhs, rhs in
+                let lhsArea = Int64(lhs.width) * Int64(lhs.height)
+                let rhsArea = Int64(rhs.width) * Int64(rhs.height)
+                if lhsArea != rhsArea { return lhsArea < rhsArea }
+                let lhsRate = min(lhs.maxFrameRate, 60)
+                let rhsRate = min(rhs.maxFrameRate, 60)
+                return lhsRate < rhsRate
+            }
     }
 
     private func startSession() {
