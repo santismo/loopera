@@ -954,7 +954,8 @@ private struct LoopTile: View {
             }
         }
         .aspectRatio(1, contentMode: .fit)
-        .opacity(slot.isPlaying || slot.state != .recorded ? 1 : 0.46)
+        .opacity(slot.isPlaying || slot.state != .recorded || editMode ? 1 : 0)
+        .animation(.easeOut(duration: 0.16), value: slot.isPlaying)
     }
 
     private var ringColor: Color? {

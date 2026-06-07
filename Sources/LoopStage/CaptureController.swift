@@ -461,6 +461,7 @@ final class CaptureController: NSObject, ObservableObject {
         recordingSlotIndex = number
         slots[slotPosition].state = .recording
         audioLoopEngine.beginRecording(slot: number, usePreBuffer: false)
+        configureMovieOutputForHighQuality()
         movieOutput.startRecording(to: outputURL, recordingDelegate: self)
         isRecording = true
         status = "Recording slot \(number)..."
@@ -503,6 +504,7 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStopTrimEndSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .armed
+        configureMovieOutputForHighQuality()
         movieOutput.startRecording(to: outputURL, recordingDelegate: self)
         isRecording = true
         status = "Slot \(number) armed for the next master start."
@@ -525,6 +527,7 @@ final class CaptureController: NSObject, ObservableObject {
         recordingSlotIndex = number
         slots[slotPosition].state = .listening
         audioLoopEngine.armThreshold(slot: number, preBufferMilliseconds: thresholdLeadMilliseconds)
+        configureMovieOutputForHighQuality()
         movieOutput.startRecording(to: outputURL, recordingDelegate: self)
         isRecording = true
         status = "Slot 1 listening for threshold."
@@ -631,6 +634,27 @@ final class CaptureController: NSObject, ObservableObject {
             return
         }
         videoFormatStatus = "Video: \(dimensions.width)x\(dimensions.height) @ \(Int(maxFrameRate.rounded())) fps."
+    }
+
+    private func configureMovieOutputForHighQuality() {
+        guard let connection = movieOutput.connection(with: .video) else { return }
+        let videoDevice = videoDevices.first(where: { $0.uniqueID == selectedDeviceID }) ?? videoDevices.first
+        let dimensions = videoDevice.map { CMVideoFormatDescriptionGetDimensions($0.activeFormat.formatDescription) }
+        let width = Int(dimensions?.width ?? 1920)
+        let height = Int(dimensions?.height ?? 1080)
+        let bitrate = max(25_000_000, width * height * 14)
+        movieOutput.setOutputSettings(
+            [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoCompressionPropertiesKey: [
+                    AVVideoAverageBitRateKey: bitrate,
+                    AVVideoExpectedSourceFrameRateKey: 60,
+                    AVVideoMaxKeyFrameIntervalKey: 60,
+                    AVVideoAllowFrameReorderingKey: false
+                ]
+            ],
+            for: connection
+        )
     }
 
     private func startSession() {

@@ -97,8 +97,9 @@ struct LoopPlayerView: NSViewRepresentable {
         private var wasPlaying = false
         private var lastSyncCorrection = Date.distantPast
         private weak var playerLayer: AVPlayerLayer?
-        private var waitingForFirstBoundary = false
-        private let visualPhaseDelay: TimeInterval = 0.04
+        private var didFadeIn = false
+        private var isFadingOut = false
+        private let visualPhaseDelay: TimeInterval = 0.11
 
         @MainActor
         func configure(
@@ -124,7 +125,8 @@ struct LoopPlayerView: NSViewRepresentable {
                 currentStartOffset = startOffset
                 currentDuration = duration
                 wasPlaying = false
-                waitingForFirstBoundary = duration > 0 && syncTime.truncatingRemainder(dividingBy: duration) > 0.06
+                didFadeIn = false
+                isFadingOut = false
 
                 let item = AVPlayerItem(url: url)
                 item.preferredForwardBufferDuration = 0
@@ -147,8 +149,8 @@ struct LoopPlayerView: NSViewRepresentable {
                 playerLayer = layer
                 layer.player = queuePlayer
                 layer.videoGravity = .resizeAspectFill
-                layer.opacity = waitingForFirstBoundary ? 0 : 1
-                let initialSeconds = waitingForFirstBoundary ? 0 : targetVideoSeconds(
+                layer.opacity = 0
+                let initialSeconds = targetVideoSeconds(
                     syncTime: syncTime,
                     syncTimeUpdatedAt: syncTimeUpdatedAt,
                     duration: duration
@@ -171,24 +173,16 @@ struct LoopPlayerView: NSViewRepresentable {
             player?.audioOutputDeviceUniqueID = audioOutputDeviceID
             playbackClock.setPlaying(slotID: slotID, isPlaying: isPlaying)
             if isPlaying {
-                if waitingForFirstBoundary, duration > 0 {
-                    let audioPhase = audioPhaseSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
-                    if audioPhase > 0.06 {
-                        player?.pause()
-                        wasPlaying = isPlaying
-                        return
-                    }
-                    waitingForFirstBoundary = false
-                    playerLayer?.opacity = 1
-                }
+                isFadingOut = false
                 if !wasPlaying {
                     syncVideoToClock(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, startOffset: startOffset, duration: duration, force: true)
                 } else {
                     syncVideoToClock(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, startOffset: startOffset, duration: duration, force: false)
                 }
                 player?.play()
+                fadeInIfNeeded()
             } else {
-                player?.pause()
+                fadeOutAndReset(startOffset: startOffset)
             }
             wasPlaying = isPlaying
         }
@@ -219,7 +213,7 @@ struct LoopPlayerView: NSViewRepresentable {
             } else {
                 wrappedDelta = rawDelta
             }
-            guard force || abs(wrappedDelta) > 0.025 else { return }
+            guard force || abs(wrappedDelta) > 0.015 else { return }
 
             let target = CMTimeAdd(
                 CMTime(seconds: startOffset, preferredTimescale: 600),
@@ -227,6 +221,41 @@ struct LoopPlayerView: NSViewRepresentable {
             )
             player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
             lastSyncCorrection = Date()
+        }
+
+        @MainActor
+        private func fadeInIfNeeded() {
+            guard !didFadeIn, let playerLayer else { return }
+            didFadeIn = true
+            playerLayer.opacity = 0
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                CATransaction.begin()
+                CATransaction.setAnimationDuration(0.18)
+                playerLayer.opacity = 1
+                CATransaction.commit()
+            }
+        }
+
+        @MainActor
+        private func fadeOutAndReset(startOffset: TimeInterval) {
+            guard let player else { return }
+            if isFadingOut { return }
+            isFadingOut = true
+            didFadeIn = false
+
+            if let playerLayer {
+                CATransaction.begin()
+                CATransaction.setAnimationDuration(0.16)
+                playerLayer.opacity = 0
+                CATransaction.commit()
+            }
+
+            let startTime = CMTime(seconds: startOffset, preferredTimescale: 600)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self, weak player] in
+                guard let self, let player, self.isFadingOut else { return }
+                player.pause()
+                player.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero)
+            }
         }
 
         private func audioPhaseSeconds(syncTime: TimeInterval, syncTimeUpdatedAt: Date, duration: TimeInterval) -> TimeInterval {

@@ -33,6 +33,8 @@ final class AudioLoopEngine {
         var hasWrapped = false
         var isPlaying = true
         var isMuted = false
+        var stopFadeRemaining = 0
+        var stopFadeTotal = 0
     }
 
     private let lock = NSLock()
@@ -138,7 +140,22 @@ final class AudioLoopEngine {
 
     func setPlaying(slot: Int, isPlaying: Bool) {
         lock.lock()
-        loops[slot]?.isPlaying = isPlaying
+        if var loop = loops[slot] {
+            if isPlaying {
+                if !loop.isPlaying {
+                    loop.playPosition = 0
+                    loop.hasWrapped = false
+                }
+                loop.isPlaying = true
+                loop.stopFadeRemaining = 0
+                loop.stopFadeTotal = 0
+            } else if loop.isPlaying {
+                let fade = stopFadeSampleCount()
+                loop.stopFadeRemaining = fade
+                loop.stopFadeTotal = fade
+            }
+            loops[slot] = loop
+        }
         lock.unlock()
     }
 
@@ -254,17 +271,31 @@ final class AudioLoopEngine {
             for frame in 0..<frameCount {
                 let left = sample(from: loop.left, position: loop.playPosition, hasWrapped: loop.hasWrapped)
                 let right = sample(from: loop.right, position: loop.playPosition, hasWrapped: loop.hasWrapped)
+                let gain: Float
+                if loop.stopFadeRemaining > 0, loop.stopFadeTotal > 0 {
+                    gain = Float(loop.stopFadeRemaining) / Float(loop.stopFadeTotal)
+                    loop.stopFadeRemaining -= 1
+                } else {
+                    gain = 1
+                }
                 for (bufferIndex, buffer) in abl.enumerated() {
                     guard let data = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
                     if abl.count == 1 {
-                        data[frame] += (left + right) * 0.5
+                        data[frame] += (left + right) * 0.5 * gain
                     } else {
-                        data[frame] += bufferIndex == 0 ? left : right
+                        data[frame] += (bufferIndex == 0 ? left : right) * gain
                     }
                 }
                 loop.playPosition = (loop.playPosition + 1) % length
                 if loop.playPosition == 0 {
                     loop.hasWrapped = true
+                }
+                if loop.stopFadeTotal > 0, loop.stopFadeRemaining == 0 {
+                    loop.playPosition = 0
+                    loop.hasWrapped = false
+                    loop.isPlaying = false
+                    loop.stopFadeTotal = 0
+                    break
                 }
             }
             loops[slotIndex] = loop
@@ -346,6 +377,10 @@ final class AudioLoopEngine {
     private func crossfadeSampleCount(for sampleCount: Int) -> Int {
         guard sampleCount > 64 else { return 0 }
         return min(sampleCount / 2, max(8, Int(sampleRate * 0.045)))
+    }
+
+    private func stopFadeSampleCount() -> Int {
+        max(8, Int(sampleRate * 0.16))
     }
 
 }
