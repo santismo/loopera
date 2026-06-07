@@ -292,8 +292,14 @@ final class CaptureController: NSObject, ObservableObject {
         let shouldPlay = !recordedIndices.contains { slots[$0].isPlaying }
         for index in recordedIndices {
             slots[index].isPlaying = shouldPlay
-            audioLoopEngine.setPlaying(slot: slots[index].index, isPlaying: shouldPlay)
+            if shouldPlay {
+                audioLoopEngine.restart(slot: slots[index].index)
+                loopPlaybackTimes[slots[index].index] = 0
+            } else {
+                audioLoopEngine.setPlaying(slot: slots[index].index, isPlaying: false)
+            }
         }
+        loopPlaybackTimeUpdatedAt = Date()
         status = shouldPlay ? "Playing all loops." : "Stopped all loops."
     }
 

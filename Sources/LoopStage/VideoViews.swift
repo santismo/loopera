@@ -154,8 +154,8 @@ struct LoopPlayerView: NSViewRepresentable {
             player?.isMuted = isMuted
             player?.audioOutputDeviceUniqueID = audioOutputDeviceID
             playbackClock.setPlaying(slotID: slotID, isPlaying: isPlaying)
-            syncVideoIfNeeded(syncTime: syncTime, startOffset: startOffset, duration: duration)
             if isPlaying {
+                syncVideoIfNeeded(syncTime: syncTime, startOffset: startOffset, duration: duration, force: player?.timeControlStatus == .paused)
                 player?.play()
             } else {
                 player?.pause()
@@ -163,15 +163,15 @@ struct LoopPlayerView: NSViewRepresentable {
         }
 
         @MainActor
-        private func syncVideoIfNeeded(syncTime: TimeInterval, startOffset: TimeInterval, duration: TimeInterval) {
-            guard let player, duration > 0, player.timeControlStatus != .paused else { return }
+        private func syncVideoIfNeeded(syncTime: TimeInterval, startOffset: TimeInterval, duration: TimeInterval, force: Bool = false) {
+            guard let player, duration > 0 else { return }
             let targetSeconds = syncTime.truncatingRemainder(dividingBy: duration)
             let currentSeconds = max(0, player.currentTime().seconds - startOffset)
             guard currentSeconds.isFinite, targetSeconds.isFinite else { return }
             let directDifference = abs(currentSeconds - targetSeconds)
             let wrappedDifference = duration - directDifference
             let difference = min(directDifference, wrappedDifference)
-            guard difference > 0.12, Date().timeIntervalSince(lastSyncSeek) > 0.4 else { return }
+            guard force || (difference > 0.12 && Date().timeIntervalSince(lastSyncSeek) > 0.4) else { return }
             lastSyncSeek = Date()
             let target = CMTimeAdd(
                 CMTime(seconds: startOffset, preferredTimescale: 600),
