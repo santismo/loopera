@@ -91,9 +91,17 @@ final class AudioLoopEngine {
     func finishRecording(slot: Int, trimEndSeconds: TimeInterval = 0) -> TimeInterval? {
         lock.lock()
         defer { lock.unlock() }
-        let inputStopCompensation = trimEndSeconds == 0 ? sampleRate * 0.012 : 0
-        let trimSamples = max(0, Int(sampleRate * trimEndSeconds + inputStopCompensation))
-        let count = max(0, min(recordBufferLeft.count, recordBufferRight.count) - trimSamples)
+        let trimSamples = max(0, Int(sampleRate * trimEndSeconds))
+        let availableCount = min(recordBufferLeft.count, recordBufferRight.count)
+        var count = max(0, availableCount - trimSamples)
+        if slot != 1,
+           let master = loops[1] {
+            let masterLength = min(master.left.count, master.right.count)
+            if masterLength > 0 {
+                let multiple = max(1, Int((Double(count) / Double(masterLength)).rounded()))
+                count = min(availableCount, multiple * masterLength)
+            }
+        }
         guard recordingSlot == slot, count > Int(sampleRate * 0.08) else {
             recordingSlot = nil
             listeningSlot = nil

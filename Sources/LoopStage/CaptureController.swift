@@ -835,9 +835,10 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
 
             let assetDuration = await measuredDuration(for: outputFileURL)
             let engineDuration = completedAudioDurations[recordingSlotIndex]
-            let duration = engineDuration
+            let rawDuration = engineDuration
                 ?? assetDuration.map { max(0.25, $0) }
                 ?? Date().timeIntervalSince(pendingStartDate ?? Date())
+            let duration = quantizedLoopDuration(rawDuration, slot: recordingSlotIndex)
             let endTrim = completedVideoEndTrims[recordingSlotIndex] ?? 0
             let startOffset: TimeInterval
             if recordingSlotIndex == 1 {
@@ -873,6 +874,19 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
         } catch {
             return nil
         }
+    }
+
+    private func quantizedLoopDuration(_ duration: TimeInterval, slot: Int) -> TimeInterval {
+        guard slot != 1,
+              let masterDuration,
+              duration.isFinite,
+              masterDuration.isFinite,
+              masterDuration > 0
+        else {
+            return duration
+        }
+        let multiple = max(1, Int((duration / masterDuration).rounded()))
+        return Double(multiple) * masterDuration
     }
 
     private func detectedMediaAudioStartOffset(for url: URL) async -> TimeInterval? {
