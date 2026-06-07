@@ -200,7 +200,7 @@ struct StageView: View {
                     if performance.isRecording {
                         Task { await performance.stop() }
                     } else {
-                        performance.start()
+                        performance.start(microphoneDeviceID: capture.selectedAudioDeviceIDs.first)
                     }
                 } label: {
                     Label(performance.isRecording ? "Stop Performance" : "Record Performance", systemImage: "rectangle.dashed.badge.record")

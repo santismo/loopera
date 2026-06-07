@@ -1,5 +1,5 @@
 import AppKit
-import AVFoundation
+@preconcurrency import AVFoundation
 import Foundation
 @preconcurrency import ScreenCaptureKit
 
@@ -11,22 +11,24 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private var stream: SCStream?
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
-    private var audioInput: AVAssetWriterInput?
+    private var appAudioInput: AVAssetWriterInput?
+    private var microphoneInput: AVAssetWriterInput?
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var didStartSession = false
+    private var isFinishing = false
     private let sampleQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.samples")
 
     @MainActor
-    func start() {
+    func start(microphoneDeviceID: String?) {
         guard !isRecording else { return }
         status = "Preparing window recorder..."
 
         Task {
             do {
-                try await startCapture()
+                try await startCapture(microphoneDeviceID: microphoneDeviceID)
                 await MainActor.run {
                     isRecording = true
-                    status = "Recording app window."
+                    status = "Recording performance."
                 }
             } catch {
                 await stop()
@@ -53,7 +55,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         await finishWriter()
     }
 
-    private func startCapture() async throws {
+    private func startCapture(microphoneDeviceID: String?) async throws {
         let windowMetrics = await MainActor.run { () -> (scale: CGFloat, width: CGFloat, height: CGFloat)? in
             guard let window = NSApp.windows.first(where: { $0.isVisible }) else { return nil }
             let scale = window.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
@@ -89,10 +91,17 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         configuration.showsCursor = false
         configuration.capturesAudio = true
         configuration.excludesCurrentProcessAudio = false
+        if #available(macOS 15.0, *) {
+            configuration.captureMicrophone = true
+            configuration.microphoneCaptureDeviceID = microphoneDeviceID
+        }
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
+        if #available(macOS 15.0, *) {
+            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: sampleQueue)
+        }
         try await stream.startCapture()
 
         self.stream = stream
@@ -101,6 +110,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
     private func prepareWriter(outputURL: URL, width: Int, height: Int) throws {
         didStartSession = false
+        isFinishing = false
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
         let videoSettings: [String: Any] = [
@@ -120,20 +130,32 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             ]
         )
 
-        let audioSettings: [String: Any] = [
+        let appAudioSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVNumberOfChannelsKey: 2,
             AVSampleRateKey: 44_100,
             AVEncoderBitRateKey: 128_000
         ]
-        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-        audioInput.expectsMediaDataInRealTime = true
+        let appAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: appAudioSettings)
+        appAudioInput.expectsMediaDataInRealTime = true
+
+        let microphoneSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVNumberOfChannelsKey: 2,
+            AVSampleRateKey: 48_000,
+            AVEncoderBitRateKey: 128_000
+        ]
+        let microphoneInput = AVAssetWriterInput(mediaType: .audio, outputSettings: microphoneSettings)
+        microphoneInput.expectsMediaDataInRealTime = true
 
         if writer.canAdd(videoInput) {
             writer.add(videoInput)
         }
-        if writer.canAdd(audioInput) {
-            writer.add(audioInput)
+        if writer.canAdd(appAudioInput) {
+            writer.add(appAudioInput)
+        }
+        if writer.canAdd(microphoneInput) {
+            writer.add(microphoneInput)
         }
 
         guard writer.startWriting() else {
@@ -142,35 +164,50 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
         self.writer = writer
         self.videoInput = videoInput
-        self.audioInput = audioInput
+        self.appAudioInput = appAudioInput
+        self.microphoneInput = microphoneInput
         self.pixelBufferAdaptor = adaptor
     }
 
     private func finishWriter() async {
-        let writer = writer
-        videoInput?.markAsFinished()
-        audioInput?.markAsFinished()
-        self.writer = nil
-        videoInput = nil
-        audioInput = nil
-        pixelBufferAdaptor = nil
-        didStartSession = false
-
-        guard let writer else {
-            status = "Program recorder idle."
-            return
-        }
-
         await withCheckedContinuation { continuation in
-            writer.finishWriting {
-                continuation.resume()
-            }
-        }
+            sampleQueue.async {
+                self.isFinishing = true
+                let writer = self.writer
+                self.videoInput?.markAsFinished()
+                self.appAudioInput?.markAsFinished()
+                self.microphoneInput?.markAsFinished()
+                self.writer = nil
+                self.videoInput = nil
+                self.appAudioInput = nil
+                self.microphoneInput = nil
+                self.pixelBufferAdaptor = nil
+                self.didStartSession = false
+                self.isFinishing = false
 
-        if writer.status == .completed {
-            status = "Saved program recording."
-        } else {
-            status = "Program recording did not finish cleanly."
+                guard let writer else {
+                    Task { @MainActor in
+                        self.status = "Performance recorder idle."
+                    }
+                    continuation.resume()
+                    return
+                }
+
+                writer.finishWriting {
+                    let finalStatus = writer.status
+                    let errorText = writer.error?.localizedDescription
+                    Task { @MainActor in
+                        if finalStatus == .completed {
+                            self.status = "Saved performance recording."
+                        } else if let errorText {
+                            self.status = "Performance recording failed: \(errorText)"
+                        } else {
+                            self.status = "Performance recording did not finish cleanly."
+                        }
+                    }
+                    continuation.resume()
+                }
+            }
         }
     }
 
@@ -195,15 +232,15 @@ extension PerformanceRecorder: SCStreamOutput {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of outputType: SCStreamOutputType
     ) {
-        guard sampleBuffer.isValid else { return }
+        guard sampleBuffer.isValid, !isFinishing else { return }
 
         switch outputType {
         case .screen:
             appendVideo(sampleBuffer)
         case .audio:
-            appendAudio(sampleBuffer)
+            appendAppAudio(sampleBuffer)
         case .microphone:
-            appendAudio(sampleBuffer)
+            appendMicrophone(sampleBuffer)
         @unknown default:
             break
         }
@@ -227,9 +264,14 @@ extension PerformanceRecorder: SCStreamOutput {
         pixelBufferAdaptor.append(imageBuffer, withPresentationTime: presentationTime)
     }
 
-    private func appendAudio(_ sampleBuffer: CMSampleBuffer) {
-        guard didStartSession, let audioInput, audioInput.isReadyForMoreMediaData else { return }
-        audioInput.append(sampleBuffer)
+    private func appendAppAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard didStartSession, let appAudioInput, appAudioInput.isReadyForMoreMediaData else { return }
+        appAudioInput.append(sampleBuffer)
+    }
+
+    private func appendMicrophone(_ sampleBuffer: CMSampleBuffer) {
+        guard didStartSession, let microphoneInput, microphoneInput.isReadyForMoreMediaData else { return }
+        microphoneInput.append(sampleBuffer)
     }
 }
 
