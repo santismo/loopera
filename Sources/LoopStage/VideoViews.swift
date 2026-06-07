@@ -91,11 +91,11 @@ struct LoopPlayerView: NSViewRepresentable {
         private var currentURL: URL?
         private var currentStartOffset: TimeInterval = -1
         private var currentDuration: TimeInterval = -1
-        private var player: AVQueuePlayer?
-        private var looper: AVPlayerLooper?
+        private var player: AVPlayer?
         private var timeObserver: Any?
         private var wasPlaying = false
         private var lastSyncCorrection = Date.distantPast
+        private var previousAudioPhase: TimeInterval?
         private weak var playerLayer: AVPlayerLayer?
         private var didFadeIn = false
         private var isFadingOut = false
@@ -126,27 +126,20 @@ struct LoopPlayerView: NSViewRepresentable {
                 wasPlaying = false
                 didFadeIn = false
                 isFadingOut = false
+                previousAudioPhase = nil
 
                 let item = AVPlayerItem(url: url)
                 item.preferredForwardBufferDuration = 0
-                let queuePlayer = AVQueuePlayer()
-                queuePlayer.actionAtItemEnd = .none
-                queuePlayer.automaticallyWaitsToMinimizeStalling = false
-
+                let player = AVPlayer(playerItem: item)
+                player.actionAtItemEnd = .none
+                player.automaticallyWaitsToMinimizeStalling = false
                 let start = CMTime(seconds: startOffset, preferredTimescale: 600)
-                if duration > 0 {
-                    let rangeDuration = CMTime(seconds: duration, preferredTimescale: 600)
-                    looper = AVPlayerLooper(
-                        player: queuePlayer,
-                        templateItem: item,
-                        timeRange: CMTimeRange(start: start, duration: rangeDuration)
-                    )
-                } else {
-                    looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
-                }
-                player = queuePlayer
+                item.forwardPlaybackEndTime = duration > 0
+                    ? CMTimeAdd(start, CMTime(seconds: duration, preferredTimescale: 600))
+                    : .invalid
+                self.player = player
                 playerLayer = layer
-                layer.player = queuePlayer
+                layer.player = player
                 layer.videoGravity = .resizeAspectFill
                 layer.opacity = 0
                 let initialSeconds = targetVideoSeconds(
@@ -155,10 +148,10 @@ struct LoopPlayerView: NSViewRepresentable {
                     duration: duration
                 )
                 let initialTime = CMTimeAdd(start, CMTime(seconds: max(0, initialSeconds), preferredTimescale: 600))
-                queuePlayer.seek(to: initialTime, toleranceBefore: .zero, toleranceAfter: .zero)
+                player.seek(to: initialTime, toleranceBefore: .zero, toleranceAfter: .zero)
                 playbackClock.update(slotID: slotID, seconds: max(0, initialSeconds))
 
-                timeObserver = queuePlayer.addPeriodicTimeObserver(
+                timeObserver = player.addPeriodicTimeObserver(
                     forInterval: CMTime(value: 1, timescale: 30),
                     queue: .main
                 ) { time in
@@ -195,12 +188,12 @@ struct LoopPlayerView: NSViewRepresentable {
             force: Bool
         ) {
             guard let player, duration > 0 else { return }
-            if !force, Date().timeIntervalSince(lastSyncCorrection) < 0.5 {
-                return
-            }
-
             let targetSeconds = targetVideoSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
             guard targetSeconds.isFinite, targetSeconds >= 0 else { return }
+            let crossedBoundary = didAudioPhaseWrap(targetSeconds: targetSeconds, duration: duration)
+            if !force, !crossedBoundary, targetSeconds >= 0.025, Date().timeIntervalSince(lastSyncCorrection) < 0.5 {
+                return
+            }
             let currentSeconds = max(0, player.currentTime().seconds - startOffset)
                 .truncatingRemainder(dividingBy: duration)
             let rawDelta = targetSeconds - currentSeconds
@@ -212,11 +205,11 @@ struct LoopPlayerView: NSViewRepresentable {
             } else {
                 wrappedDelta = rawDelta
             }
-            guard force || abs(wrappedDelta) > 0.09 else { return }
+            guard force || crossedBoundary || targetSeconds < 0.025 || abs(wrappedDelta) > 0.09 else { return }
 
             let target = CMTimeAdd(
                 CMTime(seconds: startOffset, preferredTimescale: 600),
-                CMTime(seconds: max(0, targetSeconds), preferredTimescale: 600)
+                CMTime(seconds: crossedBoundary ? 0 : max(0, targetSeconds), preferredTimescale: 600)
             )
             player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
             lastSyncCorrection = Date()
@@ -272,6 +265,12 @@ struct LoopPlayerView: NSViewRepresentable {
         private func targetVideoSeconds(syncTime: TimeInterval, syncTimeUpdatedAt: Date, duration: TimeInterval) -> TimeInterval {
             guard duration > 0 else { return 0 }
             return audioPhaseSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
+        }
+
+        private func didAudioPhaseWrap(targetSeconds: TimeInterval, duration: TimeInterval) -> Bool {
+            defer { previousAudioPhase = targetSeconds }
+            guard let previousAudioPhase else { return false }
+            return previousAudioPhase > duration * 0.82 && targetSeconds < duration * 0.18
         }
 
         deinit {
