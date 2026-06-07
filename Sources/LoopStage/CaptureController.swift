@@ -361,12 +361,25 @@ final class CaptureController: NSObject, ObservableObject {
     }
 
     func applySlotPresets(_ presets: [SlotPreset]) {
+        let savedIndices = Set(presets.map(\.index))
+        slots.removeAll { slot in
+            slot.index != 1 && !savedIndices.contains(slot.index)
+        }
+
+        for preset in presets where !slots.contains(where: { $0.index == preset.index }) {
+            slots.append(LoopSlot(index: preset.index))
+        }
+        slots.sort { $0.index < $1.index }
+
         for preset in presets {
             guard let index = slots.firstIndex(where: { $0.index == preset.index }) else { continue }
             slots[index].triggerKey = preset.triggerKey
             slots[index].customPosition = preset.customPosition
             slots[index].scale = preset.scale
             slots[index].shape = preset.shape
+        }
+        if let selectedSlotIndex, !slots.contains(where: { $0.index == selectedSlotIndex }) {
+            self.selectedSlotIndex = nil
         }
         status = "Loaded slot layout."
     }
@@ -751,7 +764,9 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
                 ?? assetDuration.map { max(0.25, $0) }
                 ?? Date().timeIntervalSince(pendingStartDate ?? Date())
             let endTrim = completedVideoEndTrims[recordingSlotIndex] ?? 0
-            let startOffset = videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
+            let startOffset = recordingSlotIndex == 1
+                ? loopStartOffset()
+                : videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
             slots[slotPosition].url = outputFileURL
             slots[slotPosition].createdAt = Date()
             slots[slotPosition].startOffset = startOffset

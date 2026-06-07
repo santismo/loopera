@@ -25,7 +25,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
         Task {
             do {
-                try await startCapture(microphoneDeviceID: microphoneDeviceID)
+                try await startCaptureWithFallbacks(microphoneDeviceID: microphoneDeviceID)
                 await MainActor.run {
                     isRecording = true
                     status = "Recording performance."
@@ -55,7 +55,28 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         await finishWriter()
     }
 
-    private func startCapture(microphoneDeviceID: String?) async throws {
+    private func startCaptureWithFallbacks(microphoneDeviceID: String?) async throws {
+        var errors: [String] = []
+        let attempts: [(deviceID: String?, captureMicrophone: Bool)] = [
+            (microphoneDeviceID, microphoneDeviceID != nil),
+            (nil, true),
+            (nil, false)
+        ]
+
+        for attempt in attempts {
+            do {
+                try await startCapture(microphoneDeviceID: attempt.deviceID, captureMicrophone: attempt.captureMicrophone)
+                return
+            } catch {
+                errors.append(error.localizedDescription)
+                cleanupWriter()
+            }
+        }
+
+        throw RecorderError.captureStartFailed(errors.joined(separator: " / "))
+    }
+
+    private func startCapture(microphoneDeviceID: String?, captureMicrophone: Bool) async throws {
         let windowMetrics = await MainActor.run { () -> (scale: CGFloat, width: CGFloat, height: CGFloat)? in
             guard let window = NSApp.windows.first(where: { $0.isVisible }) else { return nil }
             let scale = window.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
@@ -73,7 +94,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             .appendingPathComponent("Loopera-Performance-\(Self.timestamp())")
             .appendingPathExtension("mov")
 
-        try prepareWriter(outputURL: outputURL, width: width, height: height)
+        try prepareWriter(outputURL: outputURL, width: width, height: height, includesMicrophone: captureMicrophone)
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let scWindow = content.windows.first(where: { candidate in
@@ -91,15 +112,17 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         configuration.showsCursor = false
         configuration.capturesAudio = true
         configuration.excludesCurrentProcessAudio = false
+        configuration.sampleRate = 48_000
+        configuration.channelCount = 2
         if #available(macOS 15.0, *) {
-            configuration.captureMicrophone = true
+            configuration.captureMicrophone = captureMicrophone
             configuration.microphoneCaptureDeviceID = microphoneDeviceID
         }
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
-        if #available(macOS 15.0, *) {
+        if #available(macOS 15.0, *), captureMicrophone {
             try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: sampleQueue)
         }
         try await stream.startCapture()
@@ -108,7 +131,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         lastRecordingURL = outputURL
     }
 
-    private func prepareWriter(outputURL: URL, width: Int, height: Int) throws {
+    private func prepareWriter(outputURL: URL, width: Int, height: Int, includesMicrophone: Bool) throws {
         didStartSession = false
         isFinishing = false
 
@@ -133,7 +156,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         let appAudioSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVNumberOfChannelsKey: 2,
-            AVSampleRateKey: 44_100,
+            AVSampleRateKey: 48_000,
             AVEncoderBitRateKey: 128_000
         ]
         let appAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: appAudioSettings)
@@ -154,7 +177,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         if writer.canAdd(appAudioInput) {
             writer.add(appAudioInput)
         }
-        if writer.canAdd(microphoneInput) {
+        if includesMicrophone, writer.canAdd(microphoneInput) {
             writer.add(microphoneInput)
         }
 
@@ -165,8 +188,21 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         self.writer = writer
         self.videoInput = videoInput
         self.appAudioInput = appAudioInput
-        self.microphoneInput = microphoneInput
+        self.microphoneInput = includesMicrophone ? microphoneInput : nil
         self.pixelBufferAdaptor = adaptor
+    }
+
+    private func cleanupWriter() {
+        sampleQueue.sync {
+            self.writer?.cancelWriting()
+            self.writer = nil
+            self.videoInput = nil
+            self.appAudioInput = nil
+            self.microphoneInput = nil
+            self.pixelBufferAdaptor = nil
+            self.didStartSession = false
+            self.isFinishing = false
+        }
     }
 
     private func finishWriter() async {
@@ -279,6 +315,7 @@ private enum RecorderError: LocalizedError {
     case noWindow
     case noShareableWindow
     case writerStartFailed
+    case captureStartFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -288,6 +325,8 @@ private enum RecorderError: LocalizedError {
             return "Loopera could not find its own window in ScreenCaptureKit."
         case .writerStartFailed:
             return "The movie writer could not start."
+        case .captureStartFailed(let detail):
+            return "Performance capture could not start. \(detail)"
         }
     }
 }
