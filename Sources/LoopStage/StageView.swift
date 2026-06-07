@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+private enum StageFocusedField: Hashable {
+    case tempo
+}
+
 struct StageView: View {
     @StateObject private var capture = CaptureController()
     @StateObject private var output = AudioOutputController()
@@ -17,8 +21,9 @@ struct StageView: View {
     @State private var savedLayoutNames: [String] = []
     @State private var stageCaptureView: NSView?
     @State private var showOffsetSettings = false
+    @State private var showSaveLayout = false
     @State private var offsetDraft = OffsetProfile()
-    @FocusState private var layoutNameFocused: Bool
+    @FocusState private var focusedField: StageFocusedField?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -74,6 +79,15 @@ struct StageView: View {
                 },
                 save: { profile in
                     capture.saveOffsetProfile(profile)
+                }
+            )
+        }
+        .sheet(isPresented: $showSaveLayout) {
+            SaveLayoutView(
+                layoutName: $layoutName,
+                onSave: {
+                    saveLayout()
+                    showSaveLayout = false
                 }
             )
         }
@@ -199,15 +213,27 @@ struct StageView: View {
                         .font(.system(size: 11, weight: .medium))
                     TextField("BPM", value: $metronome.bpm, format: .number)
                         .textFieldStyle(.roundedBorder)
+                        .focused($focusedField, equals: .tempo)
                         .frame(width: 54)
                         .onSubmit {
                             metronome.applyTempo()
-                            capture.tempoBPM = metronome.bpm
+                            if metronome.isPlaying {
+                                capture.tempoBPM = metronome.bpm
+                            }
                         }
+                    Slider(value: $metronome.bpm, in: 20...300)
+                        .frame(width: 92)
+                        .onChange(of: metronome.bpm) {
+                            metronome.applyTempo()
+                            if metronome.isPlaying {
+                                capture.tempoBPM = metronome.bpm
+                            }
+                        }
+                        .help("Metronome tempo")
                     Button {
                         metronome.applyTempo()
-                        capture.tempoBPM = metronome.bpm
                         metronome.togglePlay()
+                        capture.tempoBPM = metronome.isPlaying ? metronome.bpm : capture.tempoBPM
                     } label: {
                         Image(systemName: metronome.isPlaying ? "stop.fill" : "play.fill")
                     }
@@ -328,16 +354,9 @@ struct StageView: View {
 
     private var layoutPresetControls: some View {
         HStack(spacing: 6) {
-            TextField("Layout", text: $layoutName)
-                .textFieldStyle(.roundedBorder)
-                .focused($layoutNameFocused)
-                .onSubmit {
-                    saveLayout()
-                }
-                .frame(width: 150)
-
             Button {
-                saveLayout()
+                layoutName = normalizedLayoutName(layoutName)
+                showSaveLayout = true
             } label: {
                 Image(systemName: "square.and.arrow.down")
             }
@@ -577,6 +596,10 @@ struct StageView: View {
             capture.threshold = preset.threshold
             capture.thresholdLeadMilliseconds = preset.thresholdLeadMilliseconds ?? capture.thresholdLeadMilliseconds
             capture.tempoBPM = preset.tempoBPM
+            if let tempo = preset.tempoBPM {
+                metronome.bpm = tempo
+                metronome.applyTempo()
+            }
             capture.applySlotPresets(preset.slots)
             capture.applyDevicePreset(
                 videoDeviceID: preset.selectedVideoDeviceID,
@@ -811,7 +834,7 @@ struct StageView: View {
     }
 
     private func handleKeyPress(_ press: KeyPress) -> KeyPress.Result {
-        if layoutNameFocused {
+        if focusedField != nil {
             return .ignored
         }
 
@@ -984,6 +1007,44 @@ struct StageView: View {
             AnyShape(DiamondShape())
         case .hexagon:
             AnyShape(HexagonShape())
+        }
+    }
+}
+
+private struct SaveLayoutView: View {
+    @Binding var layoutName: String
+    let onSave: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var nameFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Save Layout")
+                .font(.system(size: 18, weight: .semibold))
+
+            TextField("Layout name", text: $layoutName)
+                .textFieldStyle(.roundedBorder)
+                .focused($nameFocused)
+                .onSubmit(onSave)
+
+            HStack {
+                Button("Save") {
+                    onSave()
+                }
+                .keyboardShortcut(.defaultAction)
+
+                Spacer()
+
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 320)
+        .onAppear {
+            nameFocused = true
         }
     }
 }
