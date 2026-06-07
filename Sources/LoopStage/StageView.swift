@@ -56,6 +56,9 @@ struct StageView: View {
         }
         .onAppear {
             refreshSavedLayouts()
+            capture.performanceAudioHandler = { input, sampleRate, presentationTime in
+                performance.appendLiveAudio(input: input, sampleRate: sampleRate, presentationTime: presentationTime)
+            }
             capture.requestAccessAndStart()
         }
         .onChange(of: editMode) { _, isEditing in

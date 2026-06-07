@@ -9,8 +9,10 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
+    private var audioInput: AVAssetWriterInput?
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var didStartSession = false
+    private var liveAudioStartPTS: CMTime?
     private var isFinishing = false
     private var fallbackTimer: DispatchSourceTimer?
     private var fallbackStartTime: Date?
@@ -88,12 +90,26 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             sourcePixelBufferAttributes: [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                 kCVPixelBufferWidthKey as String: width,
-                kCVPixelBufferHeightKey as String: height
+                kCVPixelBufferHeightKey as String: height,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:]
             ]
         )
+        let audioInput = AVAssetWriterInput(
+            mediaType: .audio,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVNumberOfChannelsKey: 2,
+                AVSampleRateKey: 48_000,
+                AVEncoderBitRateKey: 192_000
+            ]
+        )
+        audioInput.expectsMediaDataInRealTime = true
 
         if writer.canAdd(videoInput) {
             writer.add(videoInput)
+        }
+        if writer.canAdd(audioInput) {
+            writer.add(audioInput)
         }
 
         guard writer.startWriting() else {
@@ -102,6 +118,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
         self.writer = writer
         self.videoInput = videoInput
+        self.audioInput = audioInput
         self.pixelBufferAdaptor = adaptor
     }
 
@@ -110,8 +127,10 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             self.writer?.cancelWriting()
             self.writer = nil
             self.videoInput = nil
+            self.audioInput = nil
             self.pixelBufferAdaptor = nil
             self.didStartSession = false
+            self.liveAudioStartPTS = nil
             self.isFinishing = false
             self.fallbackStartTime = nil
         }
@@ -123,10 +142,13 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
                 self.isFinishing = true
                 let writer = self.writer
                 self.videoInput?.markAsFinished()
+                self.audioInput?.markAsFinished()
                 self.writer = nil
                 self.videoInput = nil
+                self.audioInput = nil
                 self.pixelBufferAdaptor = nil
                 self.didStartSession = false
+                self.liveAudioStartPTS = nil
                 self.isFinishing = false
 
                 guard let writer else {
@@ -173,6 +195,31 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 extension PerformanceRecorder {
     @MainActor
     private func snapshot(view: NSView, width: Int, height: Int) -> CGImage? {
+        if let window = view.window,
+           let windowImage = CGWindowListCreateImage(
+            .null,
+            .optionIncludingWindow,
+            CGWindowID(window.windowNumber),
+            [.boundsIgnoreFraming, .bestResolution]
+           ) {
+            let rectInWindow = view.convert(view.bounds, to: nil)
+            let scale = CGFloat(windowImage.width) / max(1, window.frame.width)
+            let cropBounds = CGRect(x: 0, y: 0, width: windowImage.width, height: windowImage.height)
+            let cropRect = CGRect(
+                x: rectInWindow.minX * scale,
+                y: CGFloat(windowImage.height) - rectInWindow.maxY * scale,
+                width: rectInWindow.width * scale,
+                height: rectInWindow.height * scale
+            ).integral.intersection(cropBounds)
+
+            if cropRect.width > 0,
+               cropRect.height > 0,
+               let cropped = windowImage.cropping(to: cropRect) {
+                return cropped
+            }
+            return windowImage
+        }
+
         let bitmap = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: width,
@@ -223,6 +270,121 @@ extension PerformanceRecorder {
         }
         CVPixelBufferUnlockBaseAddress(buffer, [])
         pixelBufferAdaptor.append(buffer, withPresentationTime: time)
+    }
+
+    func appendLiveAudio(input: AudioLoopEngine.InputBuffer, sampleRate: Double, presentationTime: CMTime) {
+        guard !input.isEmpty, sampleRate > 0 else { return }
+        sampleQueue.async {
+            guard let audioInput = self.audioInput, audioInput.isReadyForMoreMediaData else { return }
+
+            if !self.didStartSession {
+                self.writer?.startSession(atSourceTime: .zero)
+                self.didStartSession = true
+            }
+
+            if self.liveAudioStartPTS == nil {
+                self.liveAudioStartPTS = presentationTime
+            }
+            guard let basePTS = self.liveAudioStartPTS else { return }
+            let relativePTS = CMTimeSubtract(presentationTime, basePTS)
+            guard relativePTS.isValid, relativePTS.seconds.isFinite else { return }
+
+            guard let sampleBuffer = Self.makeStereoSampleBuffer(
+                input: input,
+                sampleRate: sampleRate,
+                presentationTime: relativePTS
+            ) else { return }
+            audioInput.append(sampleBuffer)
+        }
+    }
+
+    private static func makeStereoSampleBuffer(
+        input: AudioLoopEngine.InputBuffer,
+        sampleRate: Double,
+        presentationTime: CMTime
+    ) -> CMSampleBuffer? {
+        let frameCount = input.count
+        guard frameCount > 0 else { return nil }
+
+        var interleaved = [Float]()
+        interleaved.reserveCapacity(frameCount * 2)
+        for index in 0..<frameCount {
+            interleaved.append(max(-1, min(1, input.left[index])))
+            interleaved.append(max(-1, min(1, input.right[index])))
+        }
+
+        var format = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 8,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 8,
+            mChannelsPerFrame: 2,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+        var formatDescription: CMAudioFormatDescription?
+        guard CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &format,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &formatDescription
+        ) == noErr, let formatDescription else {
+            return nil
+        }
+
+        let byteCount = interleaved.count * MemoryLayout<Float>.size
+        var blockBuffer: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: byteCount,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: byteCount,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        ) == noErr, let blockBuffer else {
+            return nil
+        }
+
+        let copied = interleaved.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return kCMBlockBufferBadPointerParameterErr }
+            return CMBlockBufferReplaceDataBytes(
+                with: baseAddress,
+                blockBuffer: blockBuffer,
+                offsetIntoDestination: 0,
+                dataLength: byteCount
+            )
+        }
+        guard copied == noErr else { return nil }
+
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: CMTimeScale(sampleRate.rounded())),
+            presentationTimeStamp: presentationTime,
+            decodeTimeStamp: .invalid
+        )
+        var sampleBuffer: CMSampleBuffer?
+        guard CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            formatDescription: formatDescription,
+            sampleCount: frameCount,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0,
+            sampleSizeArray: nil,
+            sampleBufferOut: &sampleBuffer
+        ) == noErr else {
+            return nil
+        }
+        return sampleBuffer
     }
 
 }

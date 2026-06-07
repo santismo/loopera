@@ -43,6 +43,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var quantizeTask: Task<Void, Never>?
     private var reconfigureTask: Task<Void, Never>?
     private var previousMasterPhase: Double?
+    nonisolated(unsafe) var performanceAudioHandler: ((AudioLoopEngine.InputBuffer, Double, CMTime) -> Void)?
     private nonisolated(unsafe) var audioChannelPairStartForCapture = 0
     private let lastAudioDeviceIDKey = "Loopera.lastAudioDeviceID"
     private let lastAudioChannelPairStartKey = "Loopera.lastAudioChannelPairStart"
@@ -50,6 +51,7 @@ final class CaptureController: NSObject, ObservableObject {
     private struct CapturedStereoInput {
         var buffer: AudioLoopEngine.InputBuffer
         var channelCount: Int
+        var sampleRate: Double
     }
 
     var masterDuration: TimeInterval? {
@@ -842,6 +844,7 @@ extension CaptureController: AVCaptureAudioDataOutputSampleBufferDelegate {
         }
 
         let pts = sampleBuffer.presentationTimeStamp
+        performanceAudioHandler?(capturedInput.buffer, capturedInput.sampleRate, pts)
 
         Task { @MainActor in
             detectedAudioInputChannelCount = max(2, capturedInput.channelCount)
@@ -926,13 +929,15 @@ extension CaptureController: AVCaptureAudioDataOutputSampleBufferDelegate {
             if isNonInterleaved || channelSamples.count > 1 {
                 return CapturedStereoInput(
                     buffer: stereoPlanarPair(channelSamples, channelPairStart: channelPairStart),
-                    channelCount: channelCount
+                    channelCount: channelCount,
+                    sampleRate: asbd.mSampleRate
                 )
             }
 
             return CapturedStereoInput(
                 buffer: stereoInterleavedPair(samples: channelSamples[0], channels: channels, channelPairStart: channelPairStart),
-                channelCount: channelCount
+                channelCount: channelCount,
+                sampleRate: asbd.mSampleRate
             )
         }
     }
