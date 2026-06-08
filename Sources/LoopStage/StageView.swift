@@ -1369,16 +1369,19 @@ private struct AudioTimelineView: View {
                             .foregroundStyle(.white.opacity(0.38))
                     }
             } else {
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 5) {
-                        ForEach(visibleSlots) { slot in
-                            TimelineTrackRow(
-                                slot: slot,
-                                waveform: waveforms.first(where: { $0.slot == slot.index }),
-                                syncTime: playbackTimes[slot.index] ?? 0,
-                                updatedAt: playbackTimeUpdatedAt
-                            )
-                            .frame(height: 28)
+                TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { context in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(spacing: 5) {
+                            ForEach(visibleSlots) { slot in
+                                TimelineTrackRow(
+                                    slot: slot,
+                                    waveform: waveforms.first(where: { $0.slot == slot.index }),
+                                    syncTime: syncTime(for: slot),
+                                    updatedAt: playbackTimeUpdatedAt,
+                                    now: context.date
+                                )
+                                .frame(height: 28)
+                            }
                         }
                     }
                 }
@@ -1393,6 +1396,18 @@ private struct AudioTimelineView: View {
                 .frame(height: 1)
         }
     }
+
+    private func syncTime(for slot: LoopSlot) -> TimeInterval {
+        guard slot.index != 1,
+              let master = slots.first(where: { $0.index == 1 && $0.state == .recorded }),
+              master.duration > 0,
+              abs(slot.duration - master.duration) <= 0.05,
+              let masterTime = playbackTimes[1]
+        else {
+            return playbackTimes[slot.index] ?? 0
+        }
+        return masterTime
+    }
 }
 
 private struct TimelineTrackRow: View {
@@ -1400,6 +1415,7 @@ private struct TimelineTrackRow: View {
     let waveform: AudioLoopEngine.WaveformSnapshot?
     let syncTime: TimeInterval
     let updatedAt: Date
+    let now: Date
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1446,14 +1462,12 @@ private struct TimelineTrackRow: View {
     }
 
     private func playhead(in size: CGSize) -> some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { _ in
-            let time = syncTime + Date().timeIntervalSince(updatedAt)
-            let phase = time.truncatingRemainder(dividingBy: max(0.001, slot.duration)) / max(0.001, slot.duration)
-            Rectangle()
-                .fill(.white.opacity(0.92))
-                .frame(width: 2)
-                .position(x: max(1, min(size.width - 1, size.width * phase)), y: size.height / 2)
-        }
+        let time = syncTime + now.timeIntervalSince(updatedAt)
+        let phase = time.truncatingRemainder(dividingBy: max(0.001, slot.duration)) / max(0.001, slot.duration)
+        return Rectangle()
+            .fill(.white.opacity(0.92))
+            .frame(width: 2)
+            .position(x: max(1, min(size.width - 1, size.width * phase)), y: size.height / 2)
     }
 
     private func recordingEdge(in size: CGSize) -> some View {
