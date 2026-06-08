@@ -708,6 +708,9 @@ final class CaptureController: NSObject, ObservableObject {
                 } else {
                     audioLoopEngine.restartSyncedToMaster(slot: recordingSlotIndex)
                 }
+                Task.detached(priority: .utility) { [audioLoopEngine] in
+                    audioLoopEngine.refreshRecordedWaveform(slot: recordingSlotIndex)
+                }
             }
         }
         pendingStopOnMasterBoundary = false

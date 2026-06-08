@@ -1423,7 +1423,8 @@ private struct TimelineTrackRow: View {
             var path = Path()
             for (index, sample) in samples.enumerated() {
                 let x = CGFloat(index) * step
-                let height = max(1, CGFloat(sample) * canvasSize.height * 0.82)
+                let boostedSample = sqrt(CGFloat(max(0, min(1, sample))))
+                let height = max(2, boostedSample * canvasSize.height * 0.96)
                 let rect = CGRect(x: x, y: midY - height / 2, width: max(1, step * 0.72), height: height)
                 path.addRoundedRect(in: rect, cornerSize: CGSize(width: 1, height: 1))
             }

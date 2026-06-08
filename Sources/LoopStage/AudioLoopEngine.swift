@@ -152,7 +152,6 @@ final class AudioLoopEngine: @unchecked Sendable {
         let end = min(availableCount, startSamples + count)
         let left = Array(recordBufferLeft[startSamples..<end])
         let right = Array(recordBufferRight[startSamples..<end])
-        recordedWaveforms[slot] = Self.makeWaveform(left: left, right: right, targetBins: 360)
         loops[slot] = Loop(
             left: left,
             right: right,
@@ -171,20 +170,43 @@ final class AudioLoopEngine: @unchecked Sendable {
         return duration
     }
 
+    func refreshRecordedWaveform(slot: Int) {
+        lock.lock()
+        guard let loop = loops[slot] else {
+            recordedWaveforms.removeValue(forKey: slot)
+            lock.unlock()
+            return
+        }
+        let left = loop.left
+        let right = loop.right
+        lock.unlock()
+
+        let waveform = Self.makeWaveform(left: left, right: right, targetBins: 360)
+        lock.lock()
+        if loops[slot] != nil {
+            recordedWaveforms[slot] = waveform
+        }
+        lock.unlock()
+    }
+
     func waveformSnapshots(maxBins: Int = 360) -> [WaveformSnapshot] {
         lock.lock()
-        defer { lock.unlock() }
-        var snapshots = recordedWaveforms.map { slot, samples in
+        let recorded = recordedWaveforms
+        let activeRecordingSlot = recordingSlot
+        let activeRecordingWaveform = recordingWaveform
+        lock.unlock()
+
+        var snapshots = recorded.map { slot, samples in
             WaveformSnapshot(
                 slot: slot,
                 samples: Self.resampledWaveform(samples, targetBins: maxBins),
                 isRecording: false
             )
         }
-        if let recordingSlot, !recordingWaveform.isEmpty {
+        if let activeRecordingSlot, !activeRecordingWaveform.isEmpty {
             snapshots.append(WaveformSnapshot(
-                slot: recordingSlot,
-                samples: Self.resampledWaveform(recordingWaveform, targetBins: maxBins),
+                slot: activeRecordingSlot,
+                samples: Self.resampledWaveform(activeRecordingWaveform, targetBins: maxBins),
                 isRecording: true
             ))
         }
