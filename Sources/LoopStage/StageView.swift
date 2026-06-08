@@ -42,16 +42,17 @@ struct StageView: View {
 
                         loopLayer(in: canvasSize)
 
-                        if editMode {
-                            editControlsOverlay
-                                .padding(12)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        }
-
                         StageCaptureView { view in
                             if stageCaptureView !== view {
                                 stageCaptureView = view
                             }
+                        }
+                        .allowsHitTesting(false)
+
+                        if editMode {
+                            editControlsOverlay
+                                .padding(12)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         }
                     }
                     .frame(width: canvasSize.width, height: canvasSize.height)
@@ -482,6 +483,9 @@ struct StageView: View {
                 .help("Remove selected slot")
 
                 keyMenu
+            }
+
+            HStack(spacing: 6) {
                 shapeMenu(title: "Loop", selection: Binding(
                     get: { selectedShape },
                     set: { capture.setShapeForSelected($0) }
@@ -510,7 +514,7 @@ struct StageView: View {
         }
         .font(.system(size: 12, weight: .medium))
         .padding(10)
-        .frame(width: 330, alignment: .leading)
+        .frame(maxWidth: 370, alignment: .leading)
         .background(.black.opacity(0.72))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
@@ -582,7 +586,7 @@ struct StageView: View {
         } label: {
             Label(title, systemImage: "viewfinder")
         }
-        .frame(width: 82)
+        .frame(width: 92)
     }
 
     private func compactSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
@@ -1607,7 +1611,7 @@ private struct StageCaptureView: NSViewRepresentable {
     let onResolve: (NSView) -> Void
 
     func makeNSView(context: Context) -> NSView {
-        let view = NSView()
+        let view = PassthroughNSView()
         DispatchQueue.main.async {
             if let container = view.superview {
                 onResolve(container)
@@ -1621,6 +1625,12 @@ private struct StageCaptureView: NSViewRepresentable {
             if let container = nsView.superview {
                 onResolve(container)
             }
+        }
+    }
+
+    final class PassthroughNSView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
         }
     }
 }
