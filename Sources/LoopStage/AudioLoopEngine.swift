@@ -124,19 +124,6 @@ final class AudioLoopEngine: @unchecked Sendable {
         lock.unlock()
     }
 
-    func beginRecordingSyncedToMaster(slot: Int) {
-        lock.lock()
-        let preRollSamples: Int
-        if let master = loops[1] {
-            let masterLength = min(master.left.count, master.right.count)
-            preRollSamples = masterLength > 0 ? master.playPosition % masterLength : 0
-        } else {
-            preRollSamples = 0
-        }
-        beginRecordingLocked(slot: slot, preRollSamples: preRollSamples)
-        lock.unlock()
-    }
-
     func finishRecording(slot: Int, trimStartSeconds: TimeInterval = 0, trimEndSeconds: TimeInterval = 0) -> TimeInterval? {
         lock.lock()
         defer { lock.unlock() }
@@ -145,13 +132,11 @@ final class AudioLoopEngine: @unchecked Sendable {
         let availableCount = min(recordBufferLeft.count, recordBufferRight.count)
         let trimmedAvailableCount = max(0, availableCount - startSamples - trimSamples)
         var count = trimmedAvailableCount
-        var targetCount: Int?
         if slot != 1,
            let master = loops[1] {
             let masterLength = min(master.left.count, master.right.count)
             if masterLength > 0 {
                 let multiple = max(1, Int((Double(count) / Double(masterLength)).rounded()))
-                targetCount = multiple * masterLength
                 count = min(trimmedAvailableCount, multiple * masterLength)
             }
         }
@@ -165,12 +150,8 @@ final class AudioLoopEngine: @unchecked Sendable {
         }
 
         let end = min(availableCount, startSamples + count)
-        var left = Array(recordBufferLeft[startSamples..<end])
-        var right = Array(recordBufferRight[startSamples..<end])
-        if let targetCount, targetCount > count {
-            padLoopBuffers(left: &left, right: &right, targetCount: targetCount)
-            count = targetCount
-        }
+        let left = Array(recordBufferLeft[startSamples..<end])
+        let right = Array(recordBufferRight[startSamples..<end])
         loops[slot] = Loop(
             left: left,
             right: right,
@@ -239,15 +220,6 @@ final class AudioLoopEngine: @unchecked Sendable {
         let count = min(recordBufferLeft.count, recordBufferRight.count)
         guard count > 0 else { return 0 }
         return Double(count) / sampleRate
-    }
-
-    func masterBoundaryOffsetSeconds() -> TimeInterval? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let master = loops[1] else { return nil }
-        let masterLength = min(master.left.count, master.right.count)
-        guard masterLength > 0 else { return nil }
-        return Double(master.playPosition % masterLength) / sampleRate
     }
 
     func clear(slot: Int) {
@@ -536,19 +508,6 @@ final class AudioLoopEngine: @unchecked Sendable {
         recordingWaveform.removeAll(keepingCapacity: true)
         waveformAccumulatorPeak = 0
         waveformAccumulatorCount = 0
-    }
-
-    private func padLoopBuffers(left: inout [Float], right: inout [Float], targetCount: Int) {
-        guard targetCount > left.count else { return }
-        let capturedCount = min(left.count, right.count)
-        guard capturedCount > 0 else { return }
-        left.reserveCapacity(targetCount)
-        right.reserveCapacity(targetCount)
-        while left.count < targetCount {
-            let index = left.count % capturedCount
-            left.append(left[index])
-            right.append(right[index])
-        }
     }
 
     private func ensurePreBuffer(milliseconds: Double) {

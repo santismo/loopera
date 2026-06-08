@@ -51,11 +51,8 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     @MainActor
     private func startFallbackViewCapture(view: NSView?) throws {
         guard let view else { throw RecorderError.noStageView }
-        let scale = view.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        let baseWidth = max(640, Int(view.bounds.width * scale))
-        let baseHeight = max(360, Int(view.bounds.height * scale))
         let stageAspect = max(1, view.bounds.width) / max(1, view.bounds.height)
-        let size = Self.recordingSize(baseWidth: baseWidth, baseHeight: baseHeight, aspect: stageAspect)
+        let size = Self.recordingSize(aspect: stageAspect)
         let width = Int(size.width)
         let height = Int(size.height)
         let outputURL = Self.recordingsDirectory
@@ -156,29 +153,30 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         self.pixelBufferAdaptor = adaptor
     }
 
-    private static func recordingSize(baseWidth: Int, baseHeight: Int, aspect: CGFloat) -> CGSize {
-        let sourceWidth = Double(max(640, baseWidth))
-        let sourceHeight = Double(max(360, baseHeight))
+    private static func recordingSize(aspect: CGFloat) -> CGSize {
         let sourceAspect = Double(max(0.1, aspect))
-        let maxWidth = 3840.0
-        let maxHeight = 2160.0
-        let minLongEdge = 1920.0
-
-        let requestedWidth: Double
-        let requestedHeight: Double
+        let longEdge = 1920.0
+        let shortEdge: Double
+        let width: Double
+        let height: Double
         if sourceAspect >= 1 {
-            requestedWidth = max(sourceWidth, minLongEdge)
-            requestedHeight = requestedWidth / sourceAspect
+            shortEdge = longEdge / sourceAspect
+            width = longEdge
+            height = shortEdge
         } else {
-            requestedHeight = max(sourceHeight, minLongEdge)
-            requestedWidth = requestedHeight * sourceAspect
+            shortEdge = longEdge * sourceAspect
+            width = shortEdge
+            height = longEdge
         }
 
-        let scale = min(1, maxWidth / requestedWidth, maxHeight / requestedHeight)
         return CGSize(
-            width: even(max(2, Int(requestedWidth * scale))),
-            height: even(max(2, Int(requestedHeight * scale)))
+            width: multipleOf16(max(16, Int(width))),
+            height: multipleOf16(max(16, Int(height)))
         )
+    }
+
+    private static func multipleOf16(_ value: Int) -> Int {
+        max(16, (value / 16) * 16)
     }
 
     private func cleanupWriter() {

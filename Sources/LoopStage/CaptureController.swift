@@ -664,7 +664,7 @@ final class CaptureController: NSObject, ObservableObject {
         stopTask?.cancel()
         let masterPhase = audioLoopEngine.phase(slot: 1) ?? 0
         let masterDuration = masterDuration ?? 0
-        let sincePreviousBoundary = audioLoopEngine.masterBoundaryOffsetSeconds() ?? masterPhase * masterDuration
+        let sincePreviousBoundary = masterPhase * masterDuration
         let untilNextBoundary = (1 - masterPhase) * masterDuration
         if let metronomeGridBPM {
             let beat = 60.0 / metronomeGridBPM
@@ -882,7 +882,7 @@ final class CaptureController: NSObject, ObservableObject {
         let crossedBoundary = didMasterCrossBoundary(currentPhase: masterPhase)
 
         if isRecording, pendingStopOnMasterBoundary, crossedBoundary {
-            pendingStopTrimEndSeconds = max(0, audioLoopEngine.masterBoundaryOffsetSeconds() ?? master.duration * masterPhase)
+            pendingStopTrimEndSeconds = max(0, master.duration * masterPhase)
             stopRecordingNow()
             return
         }
@@ -892,10 +892,10 @@ final class CaptureController: NSObject, ObservableObject {
            let slotPosition = slots.firstIndex(where: { $0.index == recordingSlotIndex }),
            slots[slotPosition].state == .armed,
            crossedBoundary {
-            let preRoll = max(0, audioLoopEngine.masterBoundaryOffsetSeconds() ?? master.duration * masterPhase)
+            let preRoll = max(0, master.duration * masterPhase)
             pendingStartDate = Date().addingTimeInterval(-preRoll)
             slots[slotPosition].state = .recording
-            audioLoopEngine.beginRecordingSyncedToMaster(slot: recordingSlotIndex)
+            audioLoopEngine.beginRecording(slot: recordingSlotIndex, preRollSeconds: preRoll)
             status = "Recording slot \(recordingSlotIndex)..."
             return
         }
