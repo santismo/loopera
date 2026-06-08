@@ -55,15 +55,9 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         let baseWidth = max(640, Int(view.bounds.width * scale))
         let baseHeight = max(360, Int(view.bounds.height * scale))
         let stageAspect = max(1, view.bounds.width) / max(1, view.bounds.height)
-        let width: Int
-        let height: Int
-        if stageAspect >= 1 {
-            width = Self.even(max(baseWidth, 1920))
-            height = Self.even(max(baseHeight, Int(Double(width) / Double(stageAspect))))
-        } else {
-            height = Self.even(max(baseHeight, 1920))
-            width = Self.even(max(baseWidth, Int(Double(height) * Double(stageAspect))))
-        }
+        let size = Self.recordingSize(baseWidth: baseWidth, baseHeight: baseHeight, aspect: stageAspect)
+        let width = Int(size.width)
+        let height = Int(size.height)
         let outputURL = Self.recordingsDirectory
             .appendingPathComponent("Loopera-Performance-\(Self.timestamp())-\(UUID().uuidString.prefix(8))")
             .appendingPathExtension("mov")
@@ -91,6 +85,10 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         didStartSession = false
         isFinishing = false
         try? FileManager.default.removeItem(at: outputURL)
+        try FileManager.default.createDirectory(
+            at: outputURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
         let targetBitrate = max(80_000_000, width * height * 32)
@@ -140,15 +138,12 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         )
         loopAudioInput.expectsMediaDataInRealTime = true
 
-        if writer.canAdd(videoInput) {
-            writer.add(videoInput)
-        }
-        if writer.canAdd(audioInput) {
-            writer.add(audioInput)
-        }
-        if writer.canAdd(loopAudioInput) {
-            writer.add(loopAudioInput)
-        }
+        guard writer.canAdd(videoInput) else { throw RecorderError.cannotAddVideoInput }
+        writer.add(videoInput)
+        guard writer.canAdd(audioInput) else { throw RecorderError.cannotAddLiveAudioInput }
+        writer.add(audioInput)
+        guard writer.canAdd(loopAudioInput) else { throw RecorderError.cannotAddLoopAudioInput }
+        writer.add(loopAudioInput)
 
         guard writer.startWriting() else {
             throw writer.error ?? RecorderError.writerStartFailed
@@ -159,6 +154,31 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         self.liveAudioInput = audioInput
         self.loopAudioInput = loopAudioInput
         self.pixelBufferAdaptor = adaptor
+    }
+
+    private static func recordingSize(baseWidth: Int, baseHeight: Int, aspect: CGFloat) -> CGSize {
+        let sourceWidth = Double(max(640, baseWidth))
+        let sourceHeight = Double(max(360, baseHeight))
+        let sourceAspect = Double(max(0.1, aspect))
+        let maxWidth = 3840.0
+        let maxHeight = 2160.0
+        let minLongEdge = 1920.0
+
+        let requestedWidth: Double
+        let requestedHeight: Double
+        if sourceAspect >= 1 {
+            requestedWidth = max(sourceWidth, minLongEdge)
+            requestedHeight = requestedWidth / sourceAspect
+        } else {
+            requestedHeight = max(sourceHeight, minLongEdge)
+            requestedWidth = requestedHeight * sourceAspect
+        }
+
+        let scale = min(1, maxWidth / requestedWidth, maxHeight / requestedHeight)
+        return CGSize(
+            width: even(max(2, Int(requestedWidth * scale))),
+            height: even(max(2, Int(requestedHeight * scale)))
+        )
     }
 
     private func cleanupWriter() {
@@ -467,12 +487,21 @@ extension PerformanceRecorder {
 
 private enum RecorderError: LocalizedError {
     case noStageView
+    case cannotAddVideoInput
+    case cannotAddLiveAudioInput
+    case cannotAddLoopAudioInput
     case writerStartFailed
 
     var errorDescription: String? {
         switch self {
         case .noStageView:
             return "Loopera could not find the stage view to record."
+        case .cannotAddVideoInput:
+            return "The movie writer rejected the performance video settings."
+        case .cannotAddLiveAudioInput:
+            return "The movie writer rejected the live audio settings."
+        case .cannotAddLoopAudioInput:
+            return "The movie writer rejected the loop audio settings."
         case .writerStartFailed:
             return "The movie writer could not start."
         }
