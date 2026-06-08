@@ -124,6 +124,19 @@ final class AudioLoopEngine: @unchecked Sendable {
         lock.unlock()
     }
 
+    func beginRecordingSyncedToMaster(slot: Int) {
+        lock.lock()
+        let preRollSamples: Int
+        if let master = loops[1] {
+            let masterLength = min(master.left.count, master.right.count)
+            preRollSamples = masterLength > 0 ? master.playPosition % masterLength : 0
+        } else {
+            preRollSamples = 0
+        }
+        beginRecordingLocked(slot: slot, preRollSamples: preRollSamples)
+        lock.unlock()
+    }
+
     func finishRecording(slot: Int, trimStartSeconds: TimeInterval = 0, trimEndSeconds: TimeInterval = 0) -> TimeInterval? {
         lock.lock()
         defer { lock.unlock() }
@@ -220,6 +233,15 @@ final class AudioLoopEngine: @unchecked Sendable {
         let count = min(recordBufferLeft.count, recordBufferRight.count)
         guard count > 0 else { return 0 }
         return Double(count) / sampleRate
+    }
+
+    func masterBoundaryOffsetSeconds() -> TimeInterval? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let master = loops[1] else { return nil }
+        let masterLength = min(master.left.count, master.right.count)
+        guard masterLength > 0 else { return nil }
+        return Double(master.playPosition % masterLength) / sampleRate
     }
 
     func clear(slot: Int) {
