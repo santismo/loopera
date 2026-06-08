@@ -52,26 +52,43 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private func startFallbackViewCapture(view: NSView?) throws {
         guard let view else { throw RecorderError.noStageView }
         let stageAspect = max(1, view.bounds.width) / max(1, view.bounds.height)
-        let size = Self.recordingSize(aspect: stageAspect)
-        let width = Int(size.width)
-        let height = Int(size.height)
+        let scale = view.window?.backingScaleFactor ?? view.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        let sourceSize = CGSize(width: view.bounds.width * scale, height: view.bounds.height * scale)
+        let size = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, longEdgeLimit: 2560)
+        var width = Int(size.width)
+        var height = Int(size.height)
         let outputURL = Self.recordingsDirectory
             .appendingPathComponent("Loopera-Performance-\(Self.timestamp())-\(UUID().uuidString.prefix(8))")
             .appendingPathExtension("mov")
 
-        try prepareWriter(outputURL: outputURL, width: width, height: height)
+        do {
+            try prepareWriter(outputURL: outputURL, width: width, height: height)
+        } catch {
+            cleanupWriter()
+            let fallbackSize = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, longEdgeLimit: 1920)
+            width = Int(fallbackSize.width)
+            height = Int(fallbackSize.height)
+            try prepareWriter(outputURL: outputURL, width: width, height: height)
+        }
         lastRecordingURL = outputURL
         let startTime = Date()
         fallbackStartTime = startTime
+        let captureWidth = width
+        let captureHeight = height
 
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now(), repeating: 1.0 / 60.0)
         timer.setEventHandler { [weak self, weak view] in
             guard let self, let view else { return }
-            guard let image = self.snapshot(view: view, width: width, height: height) else { return }
+            guard let image = self.snapshot(view: view, width: captureWidth, height: captureHeight) else { return }
             let elapsed = Date().timeIntervalSince(startTime)
             self.sampleQueue.async {
-                self.appendFallbackFrame(image, time: CMTime(seconds: elapsed, preferredTimescale: 600), width: width, height: height)
+                self.appendFallbackFrame(
+                    image,
+                    time: CMTime(seconds: elapsed, preferredTimescale: 600),
+                    width: captureWidth,
+                    height: captureHeight
+                )
             }
         }
         fallbackTimer = timer
@@ -153,9 +170,10 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         self.pixelBufferAdaptor = adaptor
     }
 
-    private static func recordingSize(aspect: CGFloat) -> CGSize {
+    private static func recordingSize(aspect: CGFloat, sourceSize: CGSize, longEdgeLimit: Double) -> CGSize {
         let sourceAspect = Double(max(0.1, aspect))
-        let longEdge = 1920.0
+        let sourceLongEdge = max(Double(sourceSize.width), Double(sourceSize.height))
+        let longEdge = min(longEdgeLimit, max(1920, sourceLongEdge))
         let shortEdge: Double
         let width: Double
         let height: Double

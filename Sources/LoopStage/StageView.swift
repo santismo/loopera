@@ -24,6 +24,8 @@ struct StageView: View {
     @State private var showOffsetSettings = false
     @State private var showSaveLayout = false
     @State private var offsetDraft = OffsetProfile()
+    @State private var editMenuOffset = CGSize.zero
+    @GestureState private var editMenuDrag = CGSize.zero
     @FocusState private var focusedField: StageFocusedField?
 
     var body: some View {
@@ -48,12 +50,6 @@ struct StageView: View {
                             }
                         }
                         .allowsHitTesting(false)
-
-                        if editMode {
-                            editControlsOverlay
-                                .padding(12)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        }
                     }
                     .frame(width: canvasSize.width, height: canvasSize.height)
                     .clipShape(Rectangle())
@@ -62,6 +58,17 @@ struct StageView: View {
                             .stroke(.white.opacity(editMode ? 0.24 : 0.08), lineWidth: 1)
                     }
                     .coordinateSpace(name: "stage")
+
+                    if editMode {
+                        editControlsOverlay
+                            .padding(12)
+                            .offset(
+                                x: editMenuOffset.width + editMenuDrag.width,
+                                y: editMenuOffset.height + editMenuDrag.height
+                            )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .zIndex(10)
+                    }
                 }
             }
 
@@ -461,6 +468,17 @@ struct StageView: View {
     private var editControlsOverlay: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
+                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.white.opacity(0.7))
+            .frame(height: 16)
+            .contentShape(Rectangle())
+            .gesture(editMenuDragGesture)
+            .help("Drag edit menu")
+
+            HStack(spacing: 6) {
                 Button {
                     capture.deleteSelected()
                 } label: {
@@ -521,6 +539,17 @@ struct StageView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(.white.opacity(0.12), lineWidth: 1)
         )
+    }
+
+    private var editMenuDragGesture: some Gesture {
+        DragGesture(minimumDistance: 1)
+            .updating($editMenuDrag) { value, state, _ in
+                state = value.translation
+            }
+            .onEnded { value in
+                editMenuOffset.width += value.translation.width
+                editMenuOffset.height += value.translation.height
+            }
     }
 
     private func stageCanvasSize(in available: CGSize) -> CGSize {
