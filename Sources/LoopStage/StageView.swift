@@ -12,6 +12,7 @@ struct StageView: View {
     @StateObject private var playbackClock = LoopPlaybackClock()
     @StateObject private var metronome = MetronomeController()
     @State private var layout: StageLayout = .clock
+    @State private var canvasMode: StageCanvasMode = .landscape
     @State private var editMode = false
     @State private var canvasScale = 1.0
     @State private var livePreviewZoom = 1.0
@@ -30,26 +31,37 @@ struct StageView: View {
             toolbar
 
             GeometryReader { proxy in
+                let canvasSize = stageCanvasSize(in: proxy.size)
                 ZStack {
                     Color(red: 0.045, green: 0.048, blue: 0.052)
 
-                    livePreview(in: proxy.size)
+                    ZStack {
+                        Color(red: 0.045, green: 0.048, blue: 0.052)
 
-                    loopLayer(in: proxy.size)
+                        livePreview(in: canvasSize)
 
-                    if editMode {
-                        editControlsOverlay
-                            .padding(12)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    }
+                        loopLayer(in: canvasSize)
 
-                    StageCaptureView { view in
-                        if stageCaptureView !== view {
-                            stageCaptureView = view
+                        if editMode {
+                            editControlsOverlay
+                                .padding(12)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        }
+
+                        StageCaptureView { view in
+                            if stageCaptureView !== view {
+                                stageCaptureView = view
+                            }
                         }
                     }
+                    .frame(width: canvasSize.width, height: canvasSize.height)
+                    .clipShape(Rectangle())
+                    .overlay {
+                        Rectangle()
+                            .stroke(.white.opacity(editMode ? 0.24 : 0.08), lineWidth: 1)
+                    }
+                    .coordinateSpace(name: "stage")
                 }
-                .coordinateSpace(name: "stage")
             }
 
             AudioTimelineView(
@@ -467,6 +479,14 @@ struct StageView: View {
                 shapeMenu(title: "Live", selection: $livePreviewShape)
             }
 
+            Picker("Canvas", selection: $canvasMode) {
+                ForEach(StageCanvasMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .help("Fixed video canvas aspect")
+
             compactSlider("Live Size", value: $canvasScale, range: 0.65...1.35)
             compactSlider("Live Zoom", value: $livePreviewZoom, range: 1...2.5)
             compactSlider(
@@ -487,6 +507,18 @@ struct StageView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(.white.opacity(0.12), lineWidth: 1)
         )
+    }
+
+    private func stageCanvasSize(in available: CGSize) -> CGSize {
+        let aspect = CGFloat(canvasMode.aspectRatio)
+        let availableAspect = max(0.01, available.width / max(1, available.height))
+        if availableAspect > aspect {
+            let height = available.height
+            return CGSize(width: height * aspect, height: height)
+        } else {
+            let width = available.width
+            return CGSize(width: width, height: width / aspect)
+        }
     }
 
     private var keyMenu: some View {
@@ -600,6 +632,7 @@ struct StageView: View {
             selectedAudioChannelPairStart: capture.selectedAudioChannelPairStart,
             selectedAudioOutputDeviceID: output.selectedDeviceID,
             stageLayout: layout,
+            canvasMode: canvasMode,
             canvasScale: canvasScale,
             livePreviewZoom: livePreviewZoom,
             livePreviewShape: livePreviewShape,
@@ -626,6 +659,7 @@ struct StageView: View {
             let preset = try JSONDecoder().decode(LayoutPreset.self, from: data)
             layoutName = name
             layout = preset.stageLayout
+            canvasMode = preset.canvasMode ?? .landscape
             canvasScale = preset.canvasScale
             livePreviewZoom = preset.livePreviewZoom ?? 1
             livePreviewShape = preset.livePreviewShape ?? .roundedSquare

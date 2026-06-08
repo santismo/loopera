@@ -51,37 +51,15 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     @MainActor
     private func startFallbackViewCapture(view: NSView?) throws {
         guard let view else { throw RecorderError.noStageView }
-        let scale = view.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        let sourceWidth = max(640, Int(view.bounds.width * scale))
-        let sourceHeight = max(360, Int(view.bounds.height * scale))
         let stageAspect = max(1, view.bounds.width) / max(1, view.bounds.height)
-        let preferredSize = Self.recordingSize(
-            sourceWidth: sourceWidth,
-            sourceHeight: sourceHeight,
-            aspect: stageAspect,
-            maxLongEdge: 3840
-        )
-        let fallbackSize = Self.recordingSize(
-            sourceWidth: sourceWidth,
-            sourceHeight: sourceHeight,
-            aspect: stageAspect,
-            maxLongEdge: 1920
-        )
+        let size = Self.recordingSize(aspect: stageAspect)
+        let width = Int(size.width)
+        let height = Int(size.height)
         let outputURL = Self.recordingsDirectory
             .appendingPathComponent("Loopera-Performance-\(Self.timestamp())-\(UUID().uuidString.prefix(8))")
             .appendingPathExtension("mov")
 
-        let recordingSize: CGSize
-        do {
-            try prepareWriter(outputURL: outputURL, width: Int(preferredSize.width), height: Int(preferredSize.height))
-            recordingSize = preferredSize
-        } catch {
-            cleanupWriter()
-            try prepareWriter(outputURL: outputURL, width: Int(fallbackSize.width), height: Int(fallbackSize.height))
-            recordingSize = fallbackSize
-        }
-        let width = Int(recordingSize.width)
-        let height = Int(recordingSize.height)
+        try prepareWriter(outputURL: outputURL, width: width, height: height)
         lastRecordingURL = outputURL
         let startTime = Date()
         fallbackStartTime = startTime
@@ -110,7 +88,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         )
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
-        let targetBitrate = max(120_000_000, width * height * 44)
+        let targetBitrate = max(80_000_000, width * height * 32)
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
@@ -175,15 +153,9 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         self.pixelBufferAdaptor = adaptor
     }
 
-    private static func recordingSize(
-        sourceWidth: Int,
-        sourceHeight: Int,
-        aspect: CGFloat,
-        maxLongEdge: Int
-    ) -> CGSize {
+    private static func recordingSize(aspect: CGFloat) -> CGSize {
         let sourceAspect = Double(max(0.1, aspect))
-        let sourceLongEdge = Double(max(sourceWidth, sourceHeight))
-        let longEdge = min(Double(maxLongEdge), max(1920, sourceLongEdge))
+        let longEdge = 1920.0
         let shortEdge: Double
         let width: Double
         let height: Double

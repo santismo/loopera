@@ -6,6 +6,7 @@ struct LayoutPreset: Codable {
     var selectedAudioChannelPairStart: Int?
     var selectedAudioOutputDeviceID: String?
     var stageLayout: StageLayout
+    var canvasMode: StageCanvasMode?
     var canvasScale: Double
     var livePreviewZoom: Double?
     var livePreviewShape: LoopSlotShape?
@@ -13,6 +14,22 @@ struct LayoutPreset: Codable {
     var thresholdLeadMilliseconds: Double?
     var tempoBPM: Double?
     var slots: [SlotPreset]
+}
+
+enum StageCanvasMode: String, CaseIterable, Identifiable, Codable {
+    case landscape = "Landscape"
+    case portrait = "Portrait"
+
+    var id: String { rawValue }
+
+    var aspectRatio: Double {
+        switch self {
+        case .landscape:
+            return 16.0 / 9.0
+        case .portrait:
+            return 9.0 / 16.0
+        }
+    }
 }
 
 struct SlotPreset: Codable {
