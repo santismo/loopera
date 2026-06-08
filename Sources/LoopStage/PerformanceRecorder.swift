@@ -68,20 +68,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             .appendingPathComponent("Loopera-Performance-\(Self.timestamp())")
             .appendingPathExtension("mov")
 
-        let recordingSize: CGSize
-        do {
-            try prepareWriter(outputURL: outputURL, width: width, height: height)
-            recordingSize = CGSize(width: width, height: height)
-        } catch {
-            cleanupWriter()
-            let fallbackSize = Self.encoderSafeSize(width: width, height: height)
-            try prepareWriter(
-                outputURL: outputURL,
-                width: Int(fallbackSize.width),
-                height: Int(fallbackSize.height)
-            )
-            recordingSize = fallbackSize
-        }
+        try prepareWriter(outputURL: outputURL, width: width, height: height)
         lastRecordingURL = outputURL
         let startTime = Date()
         fallbackStartTime = startTime
@@ -90,17 +77,10 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         timer.schedule(deadline: .now(), repeating: 1.0 / 60.0)
         timer.setEventHandler { [weak self, weak view] in
             guard let self, let view else { return }
-            let frameWidth = Int(recordingSize.width)
-            let frameHeight = Int(recordingSize.height)
-            guard let image = self.snapshot(view: view, width: frameWidth, height: frameHeight) else { return }
+            guard let image = self.snapshot(view: view, width: width, height: height) else { return }
             let elapsed = Date().timeIntervalSince(startTime)
             self.sampleQueue.async {
-                self.appendFallbackFrame(
-                    image,
-                    time: CMTime(seconds: elapsed, preferredTimescale: 600),
-                    width: frameWidth,
-                    height: frameHeight
-                )
+                self.appendFallbackFrame(image, time: CMTime(seconds: elapsed, preferredTimescale: 600), width: width, height: height)
             }
         }
         fallbackTimer = timer
@@ -110,11 +90,6 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private func prepareWriter(outputURL: URL, width: Int, height: Int) throws {
         didStartSession = false
         isFinishing = false
-        try? FileManager.default.removeItem(at: outputURL)
-        try FileManager.default.createDirectory(
-            at: outputURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
         let targetBitrate = max(80_000_000, width * height * 32)
@@ -183,20 +158,6 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         self.liveAudioInput = audioInput
         self.loopAudioInput = loopAudioInput
         self.pixelBufferAdaptor = adaptor
-    }
-
-    private static func encoderSafeSize(width: Int, height: Int) -> CGSize {
-        let maxDimension = 3840.0
-        let maxPixels = 3840.0 * 2160.0
-        let currentWidth = Double(max(2, width))
-        let currentHeight = Double(max(2, height))
-        let dimensionScale = min(1, maxDimension / max(currentWidth, currentHeight))
-        let pixelScale = min(1, sqrt(maxPixels / max(1, currentWidth * currentHeight)))
-        let scale = min(dimensionScale, pixelScale)
-        return CGSize(
-            width: even(Int(currentWidth * scale)),
-            height: even(Int(currentHeight * scale))
-        )
     }
 
     private func cleanupWriter() {
