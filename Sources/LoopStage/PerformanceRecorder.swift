@@ -65,7 +65,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             width = Self.even(max(baseWidth, Int(Double(height) * Double(stageAspect))))
         }
         let outputURL = Self.recordingsDirectory
-            .appendingPathComponent("Loopera-Performance-\(Self.timestamp())")
+            .appendingPathComponent("Loopera-Performance-\(Self.timestamp())-\(UUID().uuidString.prefix(8))")
             .appendingPathExtension("mov")
 
         try prepareWriter(outputURL: outputURL, width: width, height: height)
@@ -90,6 +90,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private func prepareWriter(outputURL: URL, width: Int, height: Int) throws {
         didStartSession = false
         isFinishing = false
+        try? FileManager.default.removeItem(at: outputURL)
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
         let targetBitrate = max(80_000_000, width * height * 32)

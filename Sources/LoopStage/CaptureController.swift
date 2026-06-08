@@ -666,6 +666,20 @@ final class CaptureController: NSObject, ObservableObject {
         let masterDuration = masterDuration ?? 0
         let sincePreviousBoundary = audioLoopEngine.masterBoundaryOffsetSeconds() ?? masterPhase * masterDuration
         let untilNextBoundary = (1 - masterPhase) * masterDuration
+        if let metronomeGridBPM {
+            let beat = 60.0 / metronomeGridBPM
+            let previousBoundaryGrace = beat * 1.5
+            if sincePreviousBoundary > 0, sincePreviousBoundary <= previousBoundaryGrace {
+                pendingStopTrimEndSeconds = sincePreviousBoundary
+                pendingStopOnMasterBoundary = false
+                stopRecordingNow()
+            } else {
+                pendingStopTrimEndSeconds = 0
+                pendingStopOnMasterBoundary = true
+                status = "Slot \(recordingSlotIndex ?? 0) will close on master boundary."
+            }
+            return
+        }
 
         if sincePreviousBoundary <= untilNextBoundary, sincePreviousBoundary > 0 {
             pendingStopTrimEndSeconds = sincePreviousBoundary

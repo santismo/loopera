@@ -258,14 +258,7 @@ struct StageView: View {
                         }
                         .help("Metronome tempo")
                     Button {
-                        metronome.applyTempo()
-                        metronome.togglePlay()
-                        if metronome.isPlaying {
-                            capture.tempoBPM = metronome.bpm
-                            capture.setMetronomeGrid(bpm: metronome.bpm, startDate: metronome.startedAt)
-                        } else {
-                            capture.setMetronomeGrid(bpm: nil, startDate: nil)
-                        }
+                        toggleMetronome()
                     } label: {
                         Image(systemName: metronome.isPlaying ? "stop.fill" : "play.fill")
                     }
@@ -429,6 +422,17 @@ struct StageView: View {
 
     private func openPerformanceFolder() {
         NSWorkspace.shared.open(PerformanceRecorder.recordingsDirectory)
+    }
+
+    private func toggleMetronome() {
+        metronome.applyTempo()
+        metronome.togglePlay()
+        if metronome.isPlaying {
+            capture.tempoBPM = metronome.bpm
+            capture.setMetronomeGrid(bpm: metronome.bpm, startDate: metronome.startedAt)
+        } else {
+            capture.setMetronomeGrid(bpm: nil, startDate: nil)
+        }
     }
 
     private var editControlsOverlay: some View {
@@ -890,6 +894,11 @@ struct StageView: View {
             return .handled
         }
 
+        if press.key == .tab {
+            toggleMetronome()
+            return .handled
+        }
+
         if press.key == .delete || press.key == .deleteForward {
             capture.deleteSelected()
             return .handled
@@ -933,6 +942,9 @@ struct StageView: View {
         }
 
         switch event.keyCode {
+        case 48:
+            toggleMetronome()
+            return true
         case 49:
             capture.handleSpace()
             return true
