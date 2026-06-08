@@ -1,7 +1,7 @@
 import AVFoundation
 import Foundation
 
-final class AudioLoopEngine {
+final class AudioLoopEngine: @unchecked Sendable {
     enum Event {
         case none
         case thresholdCrossed
@@ -24,6 +24,12 @@ final class AudioLoopEngine {
         var isEmpty: Bool {
             count == 0
         }
+    }
+
+    struct WaveformSnapshot {
+        var slot: Int
+        var samples: [Float]
+        var isRecording: Bool
     }
 
     private struct Loop {
@@ -50,6 +56,10 @@ final class AudioLoopEngine {
     private var recordingSlot: Int?
     private var recordBufferLeft: [Float] = []
     private var recordBufferRight: [Float] = []
+    private var recordedWaveforms: [Int: [Float]] = [:]
+    private var recordingWaveform: [Float] = []
+    private var waveformAccumulatorPeak: Float = 0
+    private var waveformAccumulatorCount = 0
     private var requestedStop = false
     var performanceOutputHandler: ((InputBuffer, Double, CMTime) -> Void)?
     private var renderSamplePosition: Int64 = 0
@@ -67,6 +77,20 @@ final class AudioLoopEngine {
         }
     }
 
+    func stop() {
+        lock.lock()
+        loops.removeAll()
+        recordedWaveforms.removeAll()
+        listeningSlot = nil
+        recordingSlot = nil
+        recordBufferLeft.removeAll(keepingCapacity: true)
+        recordBufferRight.removeAll(keepingCapacity: true)
+        resetRecordingWaveformLocked()
+        performanceOutputHandler = nil
+        lock.unlock()
+        engine.stop()
+    }
+
     func apply(profile: OffsetProfile) {
         lock.lock()
         crossfadeMilliseconds = max(0, profile.crossfadeMilliseconds)
@@ -82,6 +106,7 @@ final class AudioLoopEngine {
         requestedStop = false
         recordBufferLeft.removeAll(keepingCapacity: true)
         recordBufferRight.removeAll(keepingCapacity: true)
+        resetRecordingWaveformLocked()
         ensurePreBuffer(milliseconds: max(1, preBufferMilliseconds))
         lock.unlock()
     }
@@ -99,18 +124,20 @@ final class AudioLoopEngine {
         lock.unlock()
     }
 
-    func finishRecording(slot: Int, trimEndSeconds: TimeInterval = 0) -> TimeInterval? {
+    func finishRecording(slot: Int, trimStartSeconds: TimeInterval = 0, trimEndSeconds: TimeInterval = 0) -> TimeInterval? {
         lock.lock()
         defer { lock.unlock() }
+        let startSamples = max(0, Int(sampleRate * trimStartSeconds))
         let trimSamples = max(0, Int(sampleRate * trimEndSeconds))
         let availableCount = min(recordBufferLeft.count, recordBufferRight.count)
-        var count = max(0, availableCount - trimSamples)
+        let trimmedAvailableCount = max(0, availableCount - startSamples - trimSamples)
+        var count = trimmedAvailableCount
         if slot != 1,
            let master = loops[1] {
             let masterLength = min(master.left.count, master.right.count)
             if masterLength > 0 {
                 let multiple = max(1, Int((Double(count) / Double(masterLength)).rounded()))
-                count = min(availableCount, multiple * masterLength)
+                count = min(trimmedAvailableCount, multiple * masterLength)
             }
         }
         guard recordingSlot == slot, count > Int(sampleRate * 0.08) else {
@@ -118,11 +145,14 @@ final class AudioLoopEngine {
             listeningSlot = nil
             recordBufferLeft.removeAll(keepingCapacity: true)
             recordBufferRight.removeAll(keepingCapacity: true)
+            resetRecordingWaveformLocked()
             return nil
         }
 
-        let left = Array(recordBufferLeft.prefix(count))
-        let right = Array(recordBufferRight.prefix(count))
+        let end = min(availableCount, startSamples + count)
+        let left = Array(recordBufferLeft[startSamples..<end])
+        let right = Array(recordBufferRight[startSamples..<end])
+        recordedWaveforms[slot] = Self.makeWaveform(left: left, right: right, targetBins: 360)
         loops[slot] = Loop(
             left: left,
             right: right,
@@ -137,7 +167,28 @@ final class AudioLoopEngine {
         requestedStop = false
         recordBufferLeft.removeAll(keepingCapacity: true)
         recordBufferRight.removeAll(keepingCapacity: true)
+        resetRecordingWaveformLocked()
         return duration
+    }
+
+    func waveformSnapshots(maxBins: Int = 360) -> [WaveformSnapshot] {
+        lock.lock()
+        defer { lock.unlock() }
+        var snapshots = recordedWaveforms.map { slot, samples in
+            WaveformSnapshot(
+                slot: slot,
+                samples: Self.resampledWaveform(samples, targetBins: maxBins),
+                isRecording: false
+            )
+        }
+        if let recordingSlot, !recordingWaveform.isEmpty {
+            snapshots.append(WaveformSnapshot(
+                slot: recordingSlot,
+                samples: Self.resampledWaveform(recordingWaveform, targetBins: maxBins),
+                isRecording: true
+            ))
+        }
+        return snapshots.sorted { $0.slot < $1.slot }
     }
 
     func currentRecordingDuration(slot: Int) -> TimeInterval? {
@@ -152,6 +203,7 @@ final class AudioLoopEngine {
     func clear(slot: Int) {
         lock.lock()
         loops.removeValue(forKey: slot)
+        recordedWaveforms.removeValue(forKey: slot)
         if recordingSlot == slot { recordingSlot = nil }
         if listeningSlot == slot { listeningSlot = nil }
         lock.unlock()
@@ -160,10 +212,12 @@ final class AudioLoopEngine {
     func clearAll() {
         lock.lock()
         loops.removeAll()
+        recordedWaveforms.removeAll()
         listeningSlot = nil
         recordingSlot = nil
         recordBufferLeft.removeAll(keepingCapacity: true)
         recordBufferRight.removeAll(keepingCapacity: true)
+        resetRecordingWaveformLocked()
         lock.unlock()
     }
 
@@ -234,6 +288,22 @@ final class AudioLoopEngine {
         lock.unlock()
     }
 
+    func restartSyncedToMaster(slot: Int) {
+        lock.lock()
+        if var loop = loops[slot],
+           let master = loops[1] {
+            let length = min(loop.left.count, loop.right.count)
+            let masterLength = min(master.left.count, master.right.count)
+            if length > 0, masterLength > 0 {
+                loop.playPosition = master.playPosition % length
+                loop.hasWrapped = loop.playPosition > 0
+                loop.isPlaying = true
+                loops[slot] = loop
+            }
+        }
+        lock.unlock()
+    }
+
     func processInput(samples: InputBuffer, threshold: Float, preBufferMilliseconds: Double) -> InputAnalysis {
         guard !samples.isEmpty else {
             return InputAnalysis(rms: 0, peak: 0, event: .none)
@@ -267,8 +337,11 @@ final class AudioLoopEngine {
 
         if wasRecording {
             for index in 0..<count {
-                recordBufferLeft.append(clamp(samples.left[index]))
-                recordBufferRight.append(clamp(samples.right[index]))
+                let left = clamp(samples.left[index])
+                let right = clamp(samples.right[index])
+                recordBufferLeft.append(left)
+                recordBufferRight.append(right)
+                appendRecordingWaveformLocked(left: left, right: right)
             }
         }
 
@@ -304,7 +377,7 @@ final class AudioLoopEngine {
 
         lock.lock()
         for slotIndex in loops.keys.sorted() {
-            guard var loop = loops[slotIndex], loop.isPlaying, !loop.isMuted, !loop.left.isEmpty else { continue }
+            guard var loop = loops[slotIndex], loop.isPlaying, !loop.left.isEmpty else { continue }
             let length = min(loop.left.count, loop.right.count)
             guard length > 0 else { continue }
             for frame in 0..<frameCount {
@@ -317,12 +390,14 @@ final class AudioLoopEngine {
                 } else {
                     gain = 1
                 }
-                for (bufferIndex, buffer) in abl.enumerated() {
-                    guard let data = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
-                    if abl.count == 1 {
-                        data[frame] += (left + right) * 0.5 * gain
-                    } else {
-                        data[frame] += (bufferIndex == 0 ? left : right) * gain
+                if !loop.isMuted {
+                    for (bufferIndex, buffer) in abl.enumerated() {
+                        guard let data = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
+                        if abl.count == 1 {
+                            data[frame] += (left + right) * 0.5 * gain
+                        } else {
+                            data[frame] += (bufferIndex == 0 ? left : right) * gain
+                        }
                     }
                 }
                 loop.playPosition = (loop.playPosition + 1) % length
@@ -379,6 +454,7 @@ final class AudioLoopEngine {
         requestedStop = false
         recordBufferLeft.removeAll(keepingCapacity: true)
         recordBufferRight.removeAll(keepingCapacity: true)
+        resetRecordingWaveformLocked()
 
         if preRollSamples != 0 {
             let requested = preRollSamples ?? preBufferLeft.count
@@ -386,10 +462,30 @@ final class AudioLoopEngine {
             let start = (preWrite - count + preBufferLeft.count) % preBufferLeft.count
             for index in 0..<count {
                 let readIndex = (start + index) % preBufferLeft.count
-                recordBufferLeft.append(preBufferLeft[readIndex])
-                recordBufferRight.append(preBufferRight[readIndex])
+                let left = preBufferLeft[readIndex]
+                let right = preBufferRight[readIndex]
+                recordBufferLeft.append(left)
+                recordBufferRight.append(right)
+                appendRecordingWaveformLocked(left: left, right: right)
             }
         }
+    }
+
+    private func appendRecordingWaveformLocked(left: Float, right: Float) {
+        waveformAccumulatorPeak = max(waveformAccumulatorPeak, abs(left), abs(right))
+        waveformAccumulatorCount += 1
+        let binSize = max(128, Int(sampleRate / 120))
+        if waveformAccumulatorCount >= binSize {
+            recordingWaveform.append(min(1, waveformAccumulatorPeak))
+            waveformAccumulatorPeak = 0
+            waveformAccumulatorCount = 0
+        }
+    }
+
+    private func resetRecordingWaveformLocked() {
+        recordingWaveform.removeAll(keepingCapacity: true)
+        waveformAccumulatorPeak = 0
+        waveformAccumulatorCount = 0
     }
 
     private func ensurePreBuffer(milliseconds: Double) {
@@ -417,6 +513,39 @@ final class AudioLoopEngine {
     private func crossfadeSampleCount(for sampleCount: Int) -> Int {
         guard sampleCount > 64 else { return 0 }
         return min(sampleCount / 2, max(8, Int(sampleRate * crossfadeMilliseconds / 1000)))
+    }
+
+    private static func makeWaveform(left: [Float], right: [Float], targetBins: Int) -> [Float] {
+        let count = min(left.count, right.count)
+        guard count > 0, targetBins > 0 else { return [] }
+        let binSize = max(1, Int(ceil(Double(count) / Double(targetBins))))
+        var bins: [Float] = []
+        bins.reserveCapacity(min(targetBins, count))
+        var index = 0
+        while index < count {
+            let end = min(count, index + binSize)
+            var peak: Float = 0
+            for sampleIndex in index..<end {
+                peak = max(peak, abs(left[sampleIndex]), abs(right[sampleIndex]))
+            }
+            bins.append(min(1, peak))
+            index = end
+        }
+        return bins
+    }
+
+    private static func resampledWaveform(_ samples: [Float], targetBins: Int) -> [Float] {
+        guard samples.count > targetBins, targetBins > 0 else { return samples }
+        let binSize = max(1, Int(ceil(Double(samples.count) / Double(targetBins))))
+        var bins: [Float] = []
+        bins.reserveCapacity(targetBins)
+        var index = 0
+        while index < samples.count {
+            let end = min(samples.count, index + binSize)
+            bins.append(samples[index..<end].max() ?? 0)
+            index = end
+        }
+        return bins
     }
 
 }

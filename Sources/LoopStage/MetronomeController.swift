@@ -46,6 +46,7 @@ private func makeMetronomeSourceNode(renderState: MetronomeRenderState) -> AVAud
 final class MetronomeController: ObservableObject {
     @Published var bpm: Double = 120
     @Published private(set) var isPlaying = false
+    @Published private(set) var startedAt: Date?
     @Published var isMuted = false
     @Published var volume: Double = 0.45
 
@@ -65,20 +66,24 @@ final class MetronomeController: ObservableObject {
         renderState.bpm = max(20, min(300, bpm))
         renderState.isMuted = isMuted
         renderState.volume = volume
+        let startDate = Date()
         renderState.samplePosition = 0
         if !engine.isRunning {
             do {
                 try engine.start()
             } catch {
                 isPlaying = false
+                startedAt = nil
                 return
             }
         }
+        startedAt = startDate
         isPlaying = true
     }
 
     func stop() {
         engine.pause()
+        startedAt = nil
         isPlaying = false
     }
 

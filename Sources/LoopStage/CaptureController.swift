@@ -16,8 +16,12 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var detectedAudioInputChannelCount: Int = 2
     @Published var recordingLength: Double = 4
     @Published var inputLevel: Double = 0
-    @Published var threshold: Double = 0.006
-    @Published var thresholdLeadMilliseconds: Double = 80
+    @Published var threshold: Double = 0.006 {
+        didSet { thresholdForCapture = threshold }
+    }
+    @Published var thresholdLeadMilliseconds: Double = 80 {
+        didSet { thresholdLeadMillisecondsForCapture = thresholdLeadMilliseconds }
+    }
     @Published var tempoBPM: Double?
     @Published var selectedSlotIndex: Int?
     @Published var crossfadeMilliseconds: Double = 35
@@ -25,6 +29,7 @@ final class CaptureController: NSObject, ObservableObject {
     @Published var offsetProfile = OffsetProfile()
     @Published private(set) var loopPlaybackTimes: [Int: TimeInterval] = [:]
     @Published private(set) var loopPlaybackTimeUpdatedAt = Date()
+    @Published private(set) var waveformSnapshots: [AudioLoopEngine.WaveformSnapshot] = []
     @Published private(set) var videoFormatStatus = ""
 
     private let movieOutput = AVCaptureMovieFileOutput()
@@ -40,16 +45,23 @@ final class CaptureController: NSObject, ObservableObject {
     private var recordingSlotIndex: Int?
     private var completedAudioDurations: [Int: TimeInterval] = [:]
     private var completedVideoEndTrims: [Int: TimeInterval] = [:]
+    private var completedVideoStartTrims: [Int: TimeInterval] = [:]
     private var pendingStopOnMasterBoundary = false
     private var pendingStopTrimEndSeconds: TimeInterval = 0
+    private var pendingStartTrimSeconds: TimeInterval = 0
     private var quantizeTask: Task<Void, Never>?
     private var reconfigureTask: Task<Void, Never>?
     private var previousMasterPhase: Double?
     private var previousStoppingPhases: [Int: Double] = [:]
     private var lastPlaybackPublishDate = Date.distantPast
     private var lastMeterPublishDate = Date.distantPast
+    private var metronomeGridStartDate: Date?
     nonisolated(unsafe) var performanceAudioHandler: ((AudioLoopEngine.InputBuffer, Double, CMTime) -> Void)?
     private nonisolated(unsafe) var audioChannelPairStartForCapture = 0
+    private nonisolated(unsafe) var detectedAudioInputChannelCountForCapture = 2
+    private nonisolated(unsafe) var thresholdForCapture = 0.006
+    private nonisolated(unsafe) var thresholdLeadMillisecondsForCapture = 80.0
+    private nonisolated(unsafe) var lastMeterPublishDateForCapture = Date.distantPast
     private let lastAudioDeviceIDKey = "Loopera.lastAudioDeviceID"
     private let lastAudioChannelPairStartKey = "Loopera.lastAudioChannelPairStart"
 
@@ -76,6 +88,8 @@ final class CaptureController: NSObject, ObservableObject {
         let savedPair = UserDefaults.standard.integer(forKey: lastAudioChannelPairStartKey)
         selectedAudioChannelPairStart = max(0, savedPair - (savedPair % 2))
         audioChannelPairStartForCapture = selectedAudioChannelPairStart
+        thresholdForCapture = threshold
+        thresholdLeadMillisecondsForCapture = thresholdLeadMilliseconds
         audioMeterOutput.setSampleBufferDelegate(self, queue: audioMeterQueue)
         offsetProfile = OffsetProfileStore.load(audioDeviceID: selectedAudioDeviceIDs.first, videoDeviceID: selectedDeviceID)
         audioLoopEngine.apply(profile: offsetProfile)
@@ -97,6 +111,23 @@ final class CaptureController: NSObject, ObservableObject {
             startSession()
             startQuantizeLoop()
         }
+    }
+
+    func shutdown() {
+        stopTask?.cancel()
+        stopTask = nil
+        quantizeTask?.cancel()
+        quantizeTask = nil
+        reconfigureTask?.cancel()
+        reconfigureTask = nil
+        performanceAudioHandler = nil
+        audioLoopEngine.performanceOutputHandler = nil
+        audioLoopEngine.stop()
+        if movieOutput.isRecording {
+            movieOutput.stopRecording()
+        }
+        session.stopRunning()
+        isRecording = false
     }
 
     func refreshDevices() {
@@ -147,6 +178,7 @@ final class CaptureController: NSObject, ObservableObject {
             selectedAudioDeviceIDs = [uniqueID]
             selectAudioChannelPair(start: 0)
             detectedAudioInputChannelCount = 2
+            detectedAudioInputChannelCountForCapture = 2
             UserDefaults.standard.set(uniqueID, forKey: lastAudioDeviceIDKey)
         } else {
             selectedAudioDeviceIDs = []
@@ -474,11 +506,13 @@ final class CaptureController: NSObject, ObservableObject {
         status = "Tempo detected from master: \(Int(detected.rounded())) BPM."
     }
 
-    func setMetronomeGridBPM(_ bpm: Double?) {
+    func setMetronomeGrid(bpm: Double?, startDate: Date?) {
         if let bpm {
             metronomeGridBPM = max(20, min(300, bpm))
+            metronomeGridStartDate = startDate
         } else {
             metronomeGridBPM = nil
+            metronomeGridStartDate = nil
         }
     }
 
@@ -488,9 +522,11 @@ final class CaptureController: NSObject, ObservableObject {
         }
 
         let now = Date()
-        guard now.timeIntervalSince(lastMeterPublishDate) >= 1.0 / 20.0 else { return }
+        guard now.timeIntervalSince(lastMeterPublishDate) >= 1.0 / 15.0 else { return }
+        let nextLevel = min(1, max(inputLevel * 0.72, rms * 4.5, peak))
+        guard abs(nextLevel - inputLevel) >= 0.008 || nextLevel >= threshold else { return }
         lastMeterPublishDate = now
-        inputLevel = min(1, max(inputLevel * 0.72, rms * 4.5, peak))
+        inputLevel = nextLevel
     }
 
     private func markThresholdCrossed(presentationTime: CMTime) {
@@ -504,6 +540,7 @@ final class CaptureController: NSObject, ObservableObject {
         thresholdPTS = presentationTime
         thresholdDate = Date()
         pendingStartDate = thresholdDate
+        pendingStartTrimSeconds = metronomeStartTrimSeconds(thresholdDate: thresholdDate)
         slots[masterPosition].state = .recording
         status = "Recording slot 1..."
     }
@@ -522,6 +559,7 @@ final class CaptureController: NSObject, ObservableObject {
         thresholdPTS = nil
         pendingStopOnMasterBoundary = false
         pendingStopTrimEndSeconds = 0
+        pendingStartTrimSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .recording
         audioLoopEngine.beginRecording(slot: number, usePreBuffer: false)
@@ -566,6 +604,7 @@ final class CaptureController: NSObject, ObservableObject {
         thresholdPTS = nil
         pendingStopOnMasterBoundary = false
         pendingStopTrimEndSeconds = 0
+        pendingStartTrimSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .armed
         configureMovieOutputForHighQuality()
@@ -588,6 +627,7 @@ final class CaptureController: NSObject, ObservableObject {
         thresholdPTS = nil
         pendingStopOnMasterBoundary = false
         pendingStopTrimEndSeconds = 0
+        pendingStartTrimSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .listening
         audioLoopEngine.armThreshold(slot: number, preBufferMilliseconds: thresholdLeadMilliseconds)
@@ -602,8 +642,8 @@ final class CaptureController: NSObject, ObservableObject {
         if recordingSlotIndex == 1,
            let metronomeGridBPM,
            let currentDuration = audioLoopEngine.currentRecordingDuration(slot: 1),
-           let targetDuration = targetMetronomeStopDuration(currentDuration, bpm: metronomeGridBPM) {
-            let delay = targetDuration - currentDuration
+           let targetDuration = targetMetronomeStopDuration(max(0, currentDuration - pendingStartTrimSeconds), bpm: metronomeGridBPM) {
+            let delay = targetDuration - max(0, currentDuration - pendingStartTrimSeconds)
             if delay > 0.02 {
                 stopTask?.cancel()
                 status = "Master will close on metronome beat."
@@ -643,24 +683,36 @@ final class CaptureController: NSObject, ObservableObject {
         stopTask?.cancel()
         stopTask = nil
         if let recordingSlotIndex {
+            let trimStartSeconds = recordingSlotIndex == 1 ? pendingStartTrimSeconds : 0
             var trimEndSeconds = pendingStopTrimEndSeconds
             if recordingSlotIndex == 1 {
                 trimEndSeconds = max(0, trimEndSeconds + offsetProfile.audioStopOffsetMilliseconds / 1000)
                 if let metronomeGridBPM,
                    let currentDuration = audioLoopEngine.currentRecordingDuration(slot: recordingSlotIndex) {
-                    let quantized = quantizedMetronomeDuration(currentDuration, bpm: metronomeGridBPM)
-                    trimEndSeconds = max(0, currentDuration - quantized)
+                    let effectiveDuration = max(0, currentDuration - trimStartSeconds)
+                    let quantized = quantizedMetronomeDuration(effectiveDuration, bpm: metronomeGridBPM)
+                    trimEndSeconds = max(0, effectiveDuration - quantized)
                 }
             }
-            let duration = audioLoopEngine.finishRecording(slot: recordingSlotIndex, trimEndSeconds: trimEndSeconds)
+            let duration = audioLoopEngine.finishRecording(
+                slot: recordingSlotIndex,
+                trimStartSeconds: trimStartSeconds,
+                trimEndSeconds: trimEndSeconds
+            )
             completedAudioDurations[recordingSlotIndex] = duration
             completedVideoEndTrims[recordingSlotIndex] = trimEndSeconds
+            completedVideoStartTrims[recordingSlotIndex] = trimStartSeconds
             if duration != nil {
-                audioLoopEngine.restart(slot: recordingSlotIndex, offsetSeconds: trimEndSeconds)
+                if recordingSlotIndex == 1 {
+                    audioLoopEngine.restart(slot: recordingSlotIndex, offsetSeconds: trimEndSeconds)
+                } else {
+                    audioLoopEngine.restartSyncedToMaster(slot: recordingSlotIndex)
+                }
             }
         }
         pendingStopOnMasterBoundary = false
         pendingStopTrimEndSeconds = 0
+        pendingStartTrimSeconds = 0
         movieOutput.stopRecording()
         status = "Finishing loop..."
     }
@@ -782,12 +834,22 @@ final class CaptureController: NSObject, ObservableObject {
         quantizeTask?.cancel()
         quantizeTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(10))
+                let interval = await MainActor.run {
+                    self?.quantizeTickIntervalMilliseconds() ?? 100
+                }
+                try? await Task.sleep(for: .milliseconds(interval))
                 await MainActor.run {
                     self?.tick()
                 }
             }
         }
+    }
+
+    private func quantizeTickIntervalMilliseconds() -> Int {
+        if isRecording { return 10 }
+        if slots.contains(where: { $0.state == .armed || $0.isStopping }) { return 10 }
+        if slots.contains(where: { $0.state == .recorded && $0.isPlaying }) { return 16 }
+        return 120
     }
 
     private func tick() {
@@ -845,6 +907,7 @@ final class CaptureController: NSObject, ObservableObject {
         }
         loopPlaybackTimes = times
         loopPlaybackTimeUpdatedAt = now
+        waveformSnapshots = audioLoopEngine.waveformSnapshots()
     }
 
     private func finishStoppingLoopsAtBoundary() {
@@ -913,9 +976,10 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
                 ?? Date().timeIntervalSince(pendingStartDate ?? Date())
             let duration = quantizedLoopDuration(rawDuration, slot: recordingSlotIndex)
             let endTrim = completedVideoEndTrims[recordingSlotIndex] ?? 0
+            let startTrim = completedVideoStartTrims[recordingSlotIndex] ?? 0
             let startOffset: TimeInterval
             if recordingSlotIndex == 1 {
-                startOffset = await detectedMediaAudioStartOffset(for: outputFileURL) ?? loopStartOffset()
+                startOffset = (await detectedMediaAudioStartOffset(for: outputFileURL) ?? loopStartOffset()) + startTrim
             } else {
                 startOffset = videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
                     ?? recordingStartOffset()
@@ -937,6 +1001,7 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
             status = "Slot \(recordingSlotIndex) captured."
             completedAudioDurations[recordingSlotIndex] = nil
             completedVideoEndTrims[recordingSlotIndex] = nil
+            completedVideoStartTrims[recordingSlotIndex] = nil
             self.recordingSlotIndex = nil
         }
     }
@@ -976,6 +1041,24 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
         let beat = 60.0 / bpm
         let beats = max(1, Int((duration / beat).rounded()))
         return Double(beats) * beat
+    }
+
+    private func metronomeStartTrimSeconds(thresholdDate: Date?) -> TimeInterval {
+        guard let thresholdDate,
+              let metronomeGridBPM,
+              let metronomeGridStartDate,
+              metronomeGridBPM.isFinite,
+              metronomeGridBPM > 0
+        else { return 0 }
+
+        let audioStartDate = thresholdDate.addingTimeInterval(-thresholdLeadMilliseconds / 1000)
+        let beat = 60.0 / metronomeGridBPM
+        let thresholdElapsed = thresholdDate.timeIntervalSince(metronomeGridStartDate)
+        let nearestBeatIndex = max(0, Int((thresholdElapsed / beat).rounded()))
+        let beatDate = metronomeGridStartDate.addingTimeInterval(Double(nearestBeatIndex) * beat)
+        let trim = beatDate.timeIntervalSince(audioStartDate)
+        guard trim.isFinite, trim > 0, trim <= thresholdLeadMilliseconds / 1000 + beat * 0.5 else { return 0 }
+        return trim
     }
 
     private func detectedMediaAudioStartOffset(for url: URL) async -> TimeInterval? {
@@ -1090,8 +1173,15 @@ extension CaptureController: AVCaptureAudioDataOutputSampleBufferDelegate {
             from: sampleBuffer,
             channelPairStart: audioChannelPairStartForCapture
         ), !capturedInput.buffer.isEmpty else {
-            Task { @MainActor in
-                inputLevel *= 0.82
+            let now = Date()
+            if now.timeIntervalSince(lastMeterPublishDateForCapture) >= 0.12 {
+                lastMeterPublishDateForCapture = now
+                Task { @MainActor in
+                    let nextLevel = inputLevel * 0.82
+                    if abs(nextLevel - inputLevel) >= 0.008 {
+                        inputLevel = nextLevel
+                    }
+                }
             }
             return
         }
@@ -1099,19 +1189,40 @@ extension CaptureController: AVCaptureAudioDataOutputSampleBufferDelegate {
         let pts = sampleBuffer.presentationTimeStamp
         performanceAudioHandler?(capturedInput.buffer, capturedInput.sampleRate, pts)
 
-        Task { @MainActor in
-            detectedAudioInputChannelCount = max(2, capturedInput.channelCount)
-            if selectedAudioChannelPairStart >= detectedAudioInputChannelCount {
-                selectAudioChannelPair(start: 0)
+        let detectedChannels = max(2, capturedInput.channelCount)
+        if detectedChannels != detectedAudioInputChannelCountForCapture {
+            detectedAudioInputChannelCountForCapture = detectedChannels
+            Task { @MainActor in
+                detectedAudioInputChannelCount = detectedChannels
+                if selectedAudioChannelPairStart >= detectedAudioInputChannelCount {
+                    selectAudioChannelPair(start: 0)
+                }
             }
-            let analysis = audioLoopEngine.processInput(
-                samples: capturedInput.buffer,
-                threshold: Float(threshold),
-                preBufferMilliseconds: thresholdLeadMilliseconds
-            )
-            updateInputMeter(rms: analysis.rms, peak: analysis.peak, presentationTime: pts)
-            if case .thresholdCrossed = analysis.event {
-                markThresholdCrossed(presentationTime: pts)
+        }
+
+        let analysis = audioLoopEngine.processInput(
+            samples: capturedInput.buffer,
+            threshold: Float(thresholdForCapture),
+            preBufferMilliseconds: thresholdLeadMillisecondsForCapture
+        )
+
+        let now = Date()
+        let crossedThreshold: Bool
+        if case .thresholdCrossed = analysis.event {
+            crossedThreshold = true
+        } else {
+            crossedThreshold = false
+        }
+        let shouldPublishMeter = crossedThreshold ||
+            analysis.peak >= thresholdForCapture * 0.35 ||
+            now.timeIntervalSince(lastMeterPublishDateForCapture) >= 1.0 / 20.0
+        if shouldPublishMeter {
+            lastMeterPublishDateForCapture = now
+            Task { @MainActor in
+                updateInputMeter(rms: analysis.rms, peak: analysis.peak, presentationTime: pts)
+                if crossedThreshold {
+                    markThresholdCrossed(presentationTime: pts)
+                }
             }
         }
     }

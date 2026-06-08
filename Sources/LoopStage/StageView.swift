@@ -51,6 +51,14 @@ struct StageView: View {
                 }
                 .coordinateSpace(name: "stage")
             }
+
+            AudioTimelineView(
+                slots: capture.slots,
+                waveforms: capture.waveformSnapshots,
+                playbackTimes: capture.loopPlaybackTimes,
+                playbackTimeUpdatedAt: capture.loopPlaybackTimeUpdatedAt
+            )
+            .frame(height: 148)
         }
         .background(Color(red: 0.10, green: 0.105, blue: 0.11))
         .background(KeyEventMonitor { event in
@@ -98,6 +106,21 @@ struct StageView: View {
                 capture.selectedSlotIndex = 1
             }
             capture.status = isEditing ? "Edit mode: drag slot rings and resize selected loop." : "Edit mode off."
+        }
+        .onDisappear {
+            shutdownAudioAndCapture()
+        }
+    }
+
+    private func shutdownAudioAndCapture() {
+        capture.setPerformanceLoopAudioHandler(nil)
+        capture.performanceAudioHandler = nil
+        capture.shutdown()
+        metronome.stop()
+        if performance.isRecording {
+            Task {
+                await performance.stop()
+            }
         }
     }
 
@@ -221,7 +244,7 @@ struct StageView: View {
                             metronome.applyTempo()
                             if metronome.isPlaying {
                                 capture.tempoBPM = metronome.bpm
-                                capture.setMetronomeGridBPM(metronome.bpm)
+                                capture.setMetronomeGrid(bpm: metronome.bpm, startDate: metronome.startedAt)
                             }
                         }
                     Slider(value: $metronome.bpm, in: 20...300)
@@ -230,7 +253,7 @@ struct StageView: View {
                             metronome.applyTempo()
                             if metronome.isPlaying {
                                 capture.tempoBPM = metronome.bpm
-                                capture.setMetronomeGridBPM(metronome.bpm)
+                                capture.setMetronomeGrid(bpm: metronome.bpm, startDate: metronome.startedAt)
                             }
                         }
                         .help("Metronome tempo")
@@ -239,9 +262,9 @@ struct StageView: View {
                         metronome.togglePlay()
                         if metronome.isPlaying {
                             capture.tempoBPM = metronome.bpm
-                            capture.setMetronomeGridBPM(metronome.bpm)
+                            capture.setMetronomeGrid(bpm: metronome.bpm, startDate: metronome.startedAt)
                         } else {
-                            capture.setMetronomeGridBPM(nil)
+                            capture.setMetronomeGrid(bpm: nil, startDate: nil)
                         }
                     } label: {
                         Image(systemName: metronome.isPlaying ? "stop.fill" : "play.fill")
@@ -677,33 +700,40 @@ struct StageView: View {
         let master = capture.slots.first(where: { $0.index == 1 })
         let duration = master?.duration ?? 0
         let syncTime = capture.loopPlaybackTimes[1] ?? 0
+        let hasMaster = master?.state == .recorded && duration > 0
 
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Text("Master")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.62))
-                Text(master?.state == .recorded ? timeLabel(syncTime, duration: duration) : "--")
+                Text(hasMaster ? timeLabel(syncTime, duration: duration) : "--")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.55))
             }
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { _ in
-                GeometryReader { proxy in
-                    let phase = masterProgressPhase(
-                        syncTime: syncTime,
-                        updatedAt: capture.loopPlaybackTimeUpdatedAt,
-                        duration: duration
-                    )
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(.white.opacity(0.14))
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.green.opacity(0.92))
-                            .frame(width: max(3, proxy.size.width * phase))
+            if hasMaster {
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { _ in
+                    GeometryReader { proxy in
+                        let phase = masterProgressPhase(
+                            syncTime: syncTime,
+                            updatedAt: capture.loopPlaybackTimeUpdatedAt,
+                            duration: duration
+                        )
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(.white.opacity(0.14))
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.green.opacity(0.92))
+                                .frame(width: max(3, proxy.size.width * phase))
+                        }
                     }
                 }
+                .frame(width: 190, height: 8)
+            } else {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(.white.opacity(0.14))
+                    .frame(width: 190, height: 8)
             }
-            .frame(width: 190, height: 8)
         }
         .frame(width: 190, alignment: .leading)
     }
@@ -1288,6 +1318,164 @@ private struct HexagonShape: Shape {
         }
         path.closeSubpath()
         return path
+    }
+}
+
+private struct AudioTimelineView: View {
+    let slots: [LoopSlot]
+    let waveforms: [AudioLoopEngine.WaveformSnapshot]
+    let playbackTimes: [Int: TimeInterval]
+    let playbackTimeUpdatedAt: Date
+
+    private var visibleSlots: [LoopSlot] {
+        let waveformSlots = Set(waveforms.map(\.slot))
+        return slots.filter { slot in
+            slot.state == .recorded || slot.state == .recording || waveformSlots.contains(slot.index)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "waveform.path.ecg")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("Audio Timeline")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.72))
+                Spacer()
+                Text("not recorded")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.42))
+            }
+
+            if visibleSlots.isEmpty {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(.white.opacity(0.06))
+                    .overlay {
+                        Text("Waveforms appear while loops record.")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.38))
+                    }
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 5) {
+                        ForEach(visibleSlots) { slot in
+                            TimelineTrackRow(
+                                slot: slot,
+                                waveform: waveforms.first(where: { $0.slot == slot.index }),
+                                syncTime: playbackTimes[slot.index] ?? 0,
+                                updatedAt: playbackTimeUpdatedAt
+                            )
+                            .frame(height: 28)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.black.opacity(0.9))
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(.white.opacity(0.08))
+                .frame(height: 1)
+        }
+    }
+}
+
+private struct TimelineTrackRow: View {
+    let slot: LoopSlot
+    let waveform: AudioLoopEngine.WaveformSnapshot?
+    let syncTime: TimeInterval
+    let updatedAt: Date
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(slotLabel)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(rowColor)
+                .frame(width: 28, alignment: .center)
+
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(.white.opacity(0.075))
+                Rectangle()
+                    .fill(.white.opacity(0.16))
+                    .frame(width: 1)
+                GeometryReader { proxy in
+                    waveformCanvas(in: proxy.size)
+                    if slot.state == .recorded, slot.duration > 0, slot.isPlaying {
+                        playhead(in: proxy.size)
+                    }
+                    if waveform?.isRecording == true {
+                        recordingEdge(in: proxy.size)
+                    }
+                }
+            }
+        }
+    }
+
+    private func waveformCanvas(in size: CGSize) -> some View {
+        Canvas { context, canvasSize in
+            guard let samples = waveform?.samples, !samples.isEmpty else { return }
+            let midY = canvasSize.height / 2
+            let step = canvasSize.width / CGFloat(max(1, samples.count - 1))
+            var path = Path()
+            for (index, sample) in samples.enumerated() {
+                let x = CGFloat(index) * step
+                let height = max(1, CGFloat(sample) * canvasSize.height * 0.82)
+                let rect = CGRect(x: x, y: midY - height / 2, width: max(1, step * 0.72), height: height)
+                path.addRoundedRect(in: rect, cornerSize: CGSize(width: 1, height: 1))
+            }
+            context.fill(path, with: .color(rowColor.opacity(waveform?.isRecording == true ? 0.95 : 0.72)))
+        }
+        .frame(width: size.width, height: size.height)
+    }
+
+    private func playhead(in size: CGSize) -> some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { _ in
+            let time = syncTime + Date().timeIntervalSince(updatedAt)
+            let phase = time.truncatingRemainder(dividingBy: max(0.001, slot.duration)) / max(0.001, slot.duration)
+            Rectangle()
+                .fill(.white.opacity(0.92))
+                .frame(width: 2)
+                .position(x: max(1, min(size.width - 1, size.width * phase)), y: size.height / 2)
+        }
+    }
+
+    private func recordingEdge(in size: CGSize) -> some View {
+        Rectangle()
+            .fill(.red.opacity(0.9))
+            .frame(width: 2)
+            .position(x: size.width - 1, y: size.height / 2)
+    }
+
+    private var rowColor: Color {
+        switch slot.state {
+        case .recording:
+            return .red
+        case .recorded:
+            return slot.isMuted ? .gray : .green
+        case .armed:
+            return .cyan
+        case .listening:
+            return .yellow
+        case .empty:
+            return .white.opacity(0.5)
+        }
+    }
+
+    private var slotLabel: String {
+        switch slot.index {
+        case 10:
+            return "0"
+        case 11:
+            return "-"
+        case 12:
+            return "+"
+        default:
+            return "\(slot.index)"
+        }
     }
 }
 
