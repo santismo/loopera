@@ -927,15 +927,6 @@ final class CaptureController: NSObject, ObservableObject {
                 times[slot.index] = phase * slot.duration
             }
         }
-        if let master = slots.first(where: { $0.index == 1 && $0.state == .recorded }),
-           let masterTime = times[1],
-           master.duration > 0 {
-            for slot in slots where slot.index != 1 && slot.state == .recorded {
-                if abs(slot.duration - master.duration) <= 0.002 {
-                    times[slot.index] = masterTime
-                }
-            }
-        }
         loopPlaybackTimes = times
         loopPlaybackTimeUpdatedAt = now
         waveformSnapshots = audioLoopEngine.waveformSnapshots()

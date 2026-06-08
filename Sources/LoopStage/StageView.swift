@@ -119,6 +119,9 @@ struct StageView: View {
             }
             capture.status = isEditing ? "Edit mode: drag slot rings and resize selected loop." : "Edit mode off."
         }
+        .onChange(of: canvasMode) { _, mode in
+            capture.status = "Canvas set to \(mode.rawValue). Use Update to save this layout."
+        }
         .onDisappear {
             shutdownAudioAndCapture()
         }
@@ -397,7 +400,14 @@ struct StageView: View {
             } label: {
                 Image(systemName: "square.and.arrow.down")
             }
-            .help("Save named layout")
+            .help("Save layout as")
+
+            Button {
+                saveLayout()
+            } label: {
+                Label("Update", systemImage: "checkmark")
+            }
+            .help("Update current saved layout")
 
             Menu {
                 if savedLayoutNames.isEmpty {
