@@ -23,7 +23,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private let captureQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.capture", qos: .userInteractive)
     private let sampleQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.samples")
     private static let targetFrameRate: Int32 = 60
-    private static let maxCatchUpFrames: Int64 = 8
+    private static let maxCatchUpFrames: Int64 = 1
 
     @MainActor
     func start(microphoneDeviceID: String?, fallbackView: NSView?) {

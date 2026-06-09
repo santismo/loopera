@@ -773,6 +773,8 @@ final class CaptureController: NSObject, ObservableObject {
         guard isRecording else { return }
         stopTask?.cancel()
         stopTask = nil
+        isRecording = false
+        let shouldStopMovie = movieOutput.isRecording
         if let recordingSlotIndex {
             let trimStartSeconds = recordingSlotIndex == 1 ? pendingStartTrimSeconds : 0
             var trimEndSeconds = pendingStopTrimEndSeconds
@@ -809,7 +811,9 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStopTrimEndSeconds = 0
         pendingStopTargetDuration = nil
         pendingStartTrimSeconds = 0
-        movieOutput.stopRecording()
+        if shouldStopMovie {
+            movieOutput.stopRecording()
+        }
         status = "Finishing loop..."
     }
 

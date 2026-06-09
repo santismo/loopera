@@ -4,16 +4,18 @@ import SwiftUI
 
 struct CameraPreview: NSViewRepresentable {
     let session: AVCaptureSession
+    var videoGravity: AVLayerVideoGravity = .resizeAspectFill
 
     func makeNSView(context: Context) -> PreviewView {
         let view = PreviewView()
         view.previewLayer.session = session
-        view.previewLayer.videoGravity = .resizeAspectFill
+        view.previewLayer.videoGravity = videoGravity
         return view
     }
 
     func updateNSView(_ nsView: PreviewView, context: Context) {
         nsView.previewLayer.session = session
+        nsView.previewLayer.videoGravity = videoGravity
     }
 }
 

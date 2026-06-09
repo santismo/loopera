@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 
 private enum StageFocusedField: Hashable {
@@ -896,7 +897,7 @@ struct StageView: View {
         let height = max(90, (size.height - padding * 2) * canvasScale)
 
         ZStack {
-            CameraPreview(session: capture.session)
+            CameraPreview(session: capture.session, videoGravity: livePreviewVideoGravity)
                 .scaleEffect(livePreviewZoom)
                 .frame(width: width, height: height)
         }
@@ -909,6 +910,10 @@ struct StageView: View {
             }
         }
         .position(x: size.width / 2, y: size.height / 2)
+    }
+
+    private var livePreviewVideoGravity: AVLayerVideoGravity {
+        canvasMode == .portrait ? .resizeAspect : .resizeAspectFill
     }
 
     @ViewBuilder
