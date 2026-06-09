@@ -85,18 +85,27 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         let captureWidth = width
         let captureHeight = height
 
+        startCaptureTimer(
+            source: captureSource,
+            startTime: startTime,
+            width: captureWidth,
+            height: captureHeight
+        )
+    }
+
+    private func startCaptureTimer(source: WindowCaptureSource, startTime: Date, width: Int, height: Int) {
         let timer = DispatchSource.makeTimerSource(queue: captureQueue)
         timer.schedule(deadline: .now(), repeating: 1.0 / Double(Self.targetFrameRate), leeway: .milliseconds(2))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
-            guard let image = Self.snapshot(source: captureSource) else { return }
+            guard let image = Self.snapshot(source: source) else { return }
             let elapsed = Date().timeIntervalSince(startTime)
             self.sampleQueue.async {
                 self.appendFallbackFrame(
                     image,
                     elapsed: elapsed,
-                    width: captureWidth,
-                    height: captureHeight
+                    width: width,
+                    height: height
                 )
             }
         }
