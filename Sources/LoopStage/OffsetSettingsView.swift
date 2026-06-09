@@ -5,6 +5,7 @@ struct OffsetSettingsView: View {
     let apply: (OffsetProfile) -> Void
     let save: (OffsetProfile) -> Void
     let close: () -> Void
+    let panelWidth: CGFloat
     @State private var panelOffset = CGSize.zero
     @GestureState private var panelDrag = CGSize.zero
 
@@ -76,7 +77,7 @@ struct OffsetSettingsView: View {
         }
         .foregroundStyle(.white)
         .padding(18)
-        .frame(width: 560)
+        .frame(width: panelWidth)
         .background(.black.opacity(0.78))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(

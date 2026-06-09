@@ -35,6 +35,8 @@ struct StageView: View {
 
             GeometryReader { proxy in
                 let canvasSize = stageCanvasSize(in: proxy.size)
+                let editPanelSize = CGSize(width: min(370, max(300, proxy.size.width - 24)), height: 220)
+                let offsetPanelSize = CGSize(width: min(560, max(340, proxy.size.width - 24)), height: 285)
                 ZStack {
                     Color(red: 0.045, green: 0.048, blue: 0.052)
 
@@ -62,12 +64,18 @@ struct StageView: View {
 
                     if editMode {
                         editControlsOverlay
-                            .padding(12)
-                            .offset(
-                                x: editMenuOffset.width + editMenuDrag.width,
-                                y: editMenuOffset.height + editMenuDrag.height
+                            .frame(width: editPanelSize.width, alignment: .leading)
+                            .position(
+                                panelCenter(
+                                    panelSize: editPanelSize,
+                                    in: proxy.size,
+                                    anchor: CGPoint(x: 12, y: 12),
+                                    offset: CGSize(
+                                        width: editMenuOffset.width + editMenuDrag.width,
+                                        height: editMenuOffset.height + editMenuDrag.height
+                                    )
+                                )
                             )
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                             .zIndex(10)
                     }
 
@@ -82,13 +90,19 @@ struct StageView: View {
                             },
                             close: {
                                 showOffsetSettings = false
-                            }
+                            },
+                            panelWidth: offsetPanelSize.width
                         )
-                        .padding(12)
-                        .frame(
-                            maxWidth: .infinity,
-                            maxHeight: .infinity,
-                            alignment: canvasMode == .portrait ? .topLeading : .topTrailing
+                        .position(
+                            panelCenter(
+                                panelSize: offsetPanelSize,
+                                in: proxy.size,
+                                anchor: CGPoint(
+                                    x: canvasMode == .portrait ? 12 : max(12, proxy.size.width - offsetPanelSize.width - 12),
+                                    y: 12
+                                ),
+                                offset: .zero
+                            )
                         )
                         .zIndex(11)
                     }
@@ -470,6 +484,19 @@ struct StageView: View {
         editMode = false
         editMenuOffset = .zero
         capture.status = "Edit mode off."
+    }
+
+    private func panelCenter(panelSize: CGSize, in available: CGSize, anchor: CGPoint, offset: CGSize) -> CGPoint {
+        let proposedX = anchor.x + offset.width + panelSize.width / 2
+        let proposedY = anchor.y + offset.height + panelSize.height / 2
+        let minX = panelSize.width / 2
+        let maxX = max(minX, available.width - panelSize.width / 2)
+        let minY = panelSize.height / 2
+        let maxY = max(minY, available.height - panelSize.height / 2)
+        return CGPoint(
+            x: min(max(proposedX, minX), maxX),
+            y: min(max(proposedY, minY), maxY)
+        )
     }
 
     private func openPerformanceFolder() {
@@ -1244,7 +1271,7 @@ private struct LoopTile: View {
                     isPlaying: slot.isPlaying,
                     isStopping: slot.isStopping,
                     audioOutputDeviceID: audioOutputDeviceID,
-                    videoZoom: max(1, slot.videoZoom),
+                    videoZoom: effectiveLoopVideoZoom,
                     videoSyncOffset: offsetProfile.videoStartOffsetMilliseconds / 1000,
                     playbackClock: playbackClock,
                     syncTime: syncTime,
@@ -1271,6 +1298,11 @@ private struct LoopTile: View {
 
     private var effectiveVideoStartOffset: TimeInterval {
         max(0, slot.startOffset)
+    }
+
+    private var effectiveLoopVideoZoom: Double {
+        let zoom = max(1, slot.videoZoom)
+        return 1 + (zoom - 1) * 0.5
     }
 
     private var ringColor: Color? {
