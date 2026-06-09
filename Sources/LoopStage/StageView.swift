@@ -26,6 +26,8 @@ struct StageView: View {
     @State private var showSaveLayout = false
     @State private var offsetDraft = OffsetProfile()
     @State private var offsetMenuID = UUID()
+    @State private var editPanelOffset = CGSize.zero
+    @GestureState private var editPanelDrag = CGSize.zero
     @FocusState private var focusedField: StageFocusedField?
 
     var body: some View {
@@ -35,6 +37,10 @@ struct StageView: View {
             GeometryReader { proxy in
                 let canvasSize = stageCanvasSize(in: proxy.size)
                 let offsetPanelSize = CGSize(width: min(560, max(340, proxy.size.width - 24)), height: 285)
+                let editPanelSize = CGSize(
+                    width: min(370, max(300, proxy.size.width - 24)),
+                    height: min(270, max(220, proxy.size.height - 24))
+                )
                 ZStack {
                     Color(red: 0.045, green: 0.048, blue: 0.052)
 
@@ -59,6 +65,24 @@ struct StageView: View {
                             .stroke(.white.opacity(editMode ? 0.24 : 0.08), lineWidth: 1)
                     }
                     .coordinateSpace(name: "stage")
+
+                    if editMode {
+                        editControlsOverlay
+                            .frame(width: editPanelSize.width, alignment: .topLeading)
+                            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .position(
+                                panelCenter(
+                                    panelSize: editPanelSize,
+                                    in: proxy.size,
+                                    anchor: CGPoint(x: 12, y: 12),
+                                    offset: CGSize(
+                                        width: editPanelOffset.width + editPanelDrag.width,
+                                        height: editPanelOffset.height + editPanelDrag.height
+                                    )
+                                )
+                            )
+                            .zIndex(10)
+                    }
 
                     if showOffsetSettings {
                         OffsetSettingsView(
@@ -347,7 +371,6 @@ struct StageView: View {
                 } label: {
                     Label("Clear", systemImage: "trash")
                 }
-                .disabled(editMode)
 
                 Button {
                     if performance.isRecording {
@@ -365,7 +388,6 @@ struct StageView: View {
                 } label: {
                     Label(performance.isRecording ? "Stop Performance" : "Record Performance", systemImage: "rectangle.dashed.badge.record")
                 }
-                .disabled(editMode)
 
                 Button {
                     openPerformanceFolder()
@@ -384,10 +406,6 @@ struct StageView: View {
             HStack(spacing: 10) {
                 masterProgressBar
                 slotStatusStrip
-            }
-
-            if editMode {
-                editControlsOverlay
             }
 
         }
@@ -531,13 +549,30 @@ struct StageView: View {
         }
     }
 
+    private var editPanelDragGesture: some Gesture {
+        DragGesture(minimumDistance: 1)
+            .updating($editPanelDrag) { value, state, _ in
+                state = value.translation
+            }
+            .onEnded { value in
+                editPanelOffset.width += value.translation.width
+                editPanelOffset.height += value.translation.height
+            }
+    }
+
     private var editControlsOverlay: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 12, weight: .semibold))
-                Text("Edit")
-                    .font(.system(size: 12, weight: .semibold))
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("Edit")
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+                .gesture(editPanelDragGesture)
+
                 Spacer(minLength: 0)
 
                 Button {
