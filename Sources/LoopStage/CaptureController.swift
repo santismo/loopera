@@ -31,6 +31,7 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var loopPlaybackTimeUpdatedAt = Date()
     @Published private(set) var waveformSnapshots: [AudioLoopEngine.WaveformSnapshot] = []
     @Published private(set) var videoFormatStatus = ""
+    private var currentVideoZoom = 1.0
 
     private let movieOutput = AVCaptureMovieFileOutput()
     private let audioMeterOutput = AVCaptureAudioDataOutput()
@@ -341,6 +342,10 @@ final class CaptureController: NSObject, ObservableObject {
         status = "Offset settings saved for current devices."
     }
 
+    func setLivePreviewZoom(_ zoom: Double) {
+        currentVideoZoom = max(1, zoom)
+    }
+
     func deleteSelected() {
         guard let selectedSlotIndex else { return }
         clearSlot(selectedSlotIndex)
@@ -352,6 +357,7 @@ final class CaptureController: NSObject, ObservableObject {
         slots[slotPosition].createdAt = nil
         slots[slotPosition].duration = 0
         slots[slotPosition].startOffset = 0
+        slots[slotPosition].videoZoom = 1
         slots[slotPosition].state = .empty
         slots[slotPosition].isMuted = false
         slots[slotPosition].isPlaying = true
@@ -369,6 +375,7 @@ final class CaptureController: NSObject, ObservableObject {
             slots[index].createdAt = nil
             slots[index].duration = 0
             slots[index].startOffset = 0
+            slots[index].videoZoom = 1
             slots[index].state = .empty
             slots[index].isMuted = false
             slots[index].isPlaying = true
@@ -1078,6 +1085,7 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
             slots[slotPosition].url = outputFileURL
             slots[slotPosition].createdAt = Date()
             slots[slotPosition].startOffset = startOffset
+            slots[slotPosition].videoZoom = currentVideoZoom
             slots[slotPosition].duration = max(0.25, duration)
             slots[slotPosition].state = .recorded
             slots[slotPosition].isPlaying = true

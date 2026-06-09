@@ -187,7 +187,7 @@ struct LoopPlayerView: NSViewRepresentable {
             let targetSeconds = targetVideoSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
             guard targetSeconds.isFinite, targetSeconds >= 0 else { return }
             let crossedBoundary = didAudioPhaseWrap(targetSeconds: targetSeconds, duration: duration)
-            if !force, !crossedBoundary, targetSeconds >= 0.025, Date().timeIntervalSince(lastSyncCorrection) < 1.0 {
+            if !force, !crossedBoundary, targetSeconds >= 0.025, Date().timeIntervalSince(lastSyncCorrection) < 0.35 {
                 return
             }
             let currentSeconds = max(0, player.currentTime().seconds - startOffset)
@@ -201,7 +201,7 @@ struct LoopPlayerView: NSViewRepresentable {
             } else {
                 wrappedDelta = rawDelta
             }
-            guard force || crossedBoundary || targetSeconds < 0.025 || abs(wrappedDelta) > 0.16 else { return }
+            guard force || crossedBoundary || targetSeconds < 0.025 || abs(wrappedDelta) > 0.06 else { return }
 
             let target = CMTimeAdd(
                 CMTime(seconds: startOffset, preferredTimescale: 600),
@@ -218,13 +218,8 @@ struct LoopPlayerView: NSViewRepresentable {
         private func fadeInIfNeeded() {
             guard !didFadeIn, let playerLayer else { return }
             didFadeIn = true
-            playerLayer.opacity = 0
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                CATransaction.begin()
-                CATransaction.setAnimationDuration(0.18)
-                playerLayer.opacity = 1
-                CATransaction.commit()
-            }
+            playerLayer.removeAnimation(forKey: "loopera.opacity")
+            playerLayer.opacity = 1
         }
 
         @MainActor

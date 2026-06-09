@@ -16,6 +16,7 @@ struct LoopSlot: Identifiable, Equatable {
     var createdAt: Date?
     var duration: TimeInterval = 0
     var startOffset: TimeInterval = 0
+    var videoZoom: Double = 1
     var state: LoopSlotState = .empty
     var isMuted = false
     var isPlaying = true

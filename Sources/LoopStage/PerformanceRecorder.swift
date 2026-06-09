@@ -64,13 +64,13 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             .appendingPathExtension("mov")
 
         do {
-            try prepareWriter(outputURL: outputURL, width: width, height: height)
+            try prepareWriter(outputURL: outputURL, width: width, height: height, codec: .hevc)
         } catch {
             cleanupWriter()
             let fallbackSize = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, minimumLongEdge: 1920, longEdgeLimit: 1920)
             width = Int(fallbackSize.width)
             height = Int(fallbackSize.height)
-            try prepareWriter(outputURL: outputURL, width: width, height: height)
+            try prepareWriter(outputURL: outputURL, width: width, height: height, codec: .h264)
         }
         lastRecordingURL = outputURL
         let startTime = Date()
@@ -106,7 +106,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         timer.resume()
     }
 
-    private func prepareWriter(outputURL: URL, width: Int, height: Int) throws {
+    private func prepareWriter(outputURL: URL, width: Int, height: Int, codec: AVVideoCodecType) throws {
         didStartSession = false
         isFinishing = false
         try? FileManager.default.removeItem(at: outputURL)
@@ -116,17 +116,19 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         )
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
-        let targetBitrate = max(80_000_000, width * height * 24)
-        let compressionProperties: [String: Any] = [
+        let targetBitrate = max(80_000_000, width * height * (codec == .hevc ? 18 : 24))
+        var compressionProperties: [String: Any] = [
             AVVideoAverageBitRateKey: targetBitrate,
             AVVideoExpectedSourceFrameRateKey: Int(Self.targetFrameRate),
             AVVideoMaxKeyFrameIntervalKey: Int(Self.targetFrameRate),
             AVVideoMaxKeyFrameIntervalDurationKey: 1,
-            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
             AVVideoAllowFrameReorderingKey: false
         ]
+        if codec == .h264 {
+            compressionProperties[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
+        }
         let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoCodecKey: codec,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
             AVVideoCompressionPropertiesKey: compressionProperties

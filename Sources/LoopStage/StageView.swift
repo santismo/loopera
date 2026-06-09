@@ -95,6 +95,7 @@ struct StageView: View {
         .onAppear {
             refreshSavedLayouts()
             offsetDraft = capture.offsetProfile
+            capture.setLivePreviewZoom(livePreviewZoom)
             metronome.bpm = capture.tempoBPM ?? 120
             capture.performanceAudioHandler = { input, sampleRate, presentationTime in
                 performance.appendLiveAudio(input: input, sampleRate: sampleRate, presentationTime: presentationTime)
@@ -129,6 +130,9 @@ struct StageView: View {
         }
         .onChange(of: canvasMode) { _, mode in
             capture.status = "Canvas set to \(mode.rawValue). Use Update to save this layout."
+        }
+        .onChange(of: livePreviewZoom) { _, zoom in
+            capture.setLivePreviewZoom(zoom)
         }
         .onDisappear {
             shutdownAudioAndCapture()
@@ -1203,6 +1207,7 @@ private struct LoopTile: View {
                     syncTime: syncTime,
                     syncTimeUpdatedAt: syncTimeUpdatedAt
                 )
+                    .scaleEffect(max(1, slot.videoZoom))
                     .clipShape(tileShape)
                     .shadow(color: .black.opacity(editMode ? 0 : 0.45), radius: editMode ? 0 : 16, y: editMode ? 0 : 8)
             } else {
