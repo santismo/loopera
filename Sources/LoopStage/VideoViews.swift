@@ -46,6 +46,8 @@ struct LoopPlayerView: NSViewRepresentable {
     let isPlaying: Bool
     let isStopping: Bool
     let audioOutputDeviceID: String?
+    let videoZoom: Double
+    let videoSyncOffset: TimeInterval
     let playbackClock: LoopPlaybackClock
     let syncTime: TimeInterval
     let syncTimeUpdatedAt: Date
@@ -56,6 +58,7 @@ struct LoopPlayerView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> PlayerHostView {
         let view = PlayerHostView()
+        view.videoZoom = max(1, CGFloat(videoZoom))
         context.coordinator.configure(
             url: url,
             slotID: slotID,
@@ -65,6 +68,8 @@ struct LoopPlayerView: NSViewRepresentable {
             isPlaying: isPlaying,
             isStopping: isStopping,
             audioOutputDeviceID: audioOutputDeviceID,
+            videoZoom: videoZoom,
+            videoSyncOffset: videoSyncOffset,
             playbackClock: playbackClock,
             syncTime: syncTime,
             syncTimeUpdatedAt: syncTimeUpdatedAt,
@@ -74,6 +79,7 @@ struct LoopPlayerView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: PlayerHostView, context: Context) {
+        nsView.videoZoom = max(1, CGFloat(videoZoom))
         context.coordinator.configure(
             url: url,
             slotID: slotID,
@@ -83,6 +89,8 @@ struct LoopPlayerView: NSViewRepresentable {
             isPlaying: isPlaying,
             isStopping: isStopping,
             audioOutputDeviceID: audioOutputDeviceID,
+            videoZoom: videoZoom,
+            videoSyncOffset: videoSyncOffset,
             playbackClock: playbackClock,
             syncTime: syncTime,
             syncTimeUpdatedAt: syncTimeUpdatedAt,
@@ -98,6 +106,8 @@ struct LoopPlayerView: NSViewRepresentable {
         private var wasPlaying = false
         private var lastSyncCorrection = Date.distantPast
         private var previousAudioPhase: TimeInterval?
+        private var currentVideoZoom: Double = 1
+        private var currentVideoSyncOffset: TimeInterval = 0
         private weak var playerLayer: AVPlayerLayer?
         private var didFadeIn = false
         private var isFadingOut = false
@@ -112,11 +122,16 @@ struct LoopPlayerView: NSViewRepresentable {
             isPlaying: Bool,
             isStopping: Bool,
             audioOutputDeviceID: String?,
+            videoZoom: Double,
+            videoSyncOffset: TimeInterval,
             playbackClock: LoopPlaybackClock,
             syncTime: TimeInterval,
             syncTimeUpdatedAt: Date,
             in layer: AVPlayerLayer
         ) {
+            currentVideoZoom = max(1, videoZoom)
+            let syncOffsetChanged = abs(currentVideoSyncOffset - videoSyncOffset) > 0.0005
+            currentVideoSyncOffset = videoSyncOffset
             if currentURL != url || currentStartOffset != startOffset || currentDuration != duration {
                 currentURL = url
                 currentStartOffset = startOffset
@@ -143,16 +158,15 @@ struct LoopPlayerView: NSViewRepresentable {
                 let initialSeconds = targetVideoSeconds(
                     syncTime: syncTime,
                     syncTimeUpdatedAt: syncTimeUpdatedAt,
-                    duration: duration
+                    duration: duration,
+                    videoSyncOffset: videoSyncOffset
                 )
                 let initialTime = CMTimeAdd(start, CMTime(seconds: max(0, initialSeconds), preferredTimescale: 600))
                 player.seek(to: initialTime, toleranceBefore: .zero, toleranceAfter: .zero)
-                playbackClock.update(slotID: slotID, seconds: max(0, initialSeconds))
             }
 
             player?.isMuted = isMuted
             player?.audioOutputDeviceUniqueID = audioOutputDeviceID
-            playbackClock.setPlaying(slotID: slotID, isPlaying: isPlaying)
             if isPlaying {
                 let currentAudioPhase = audioPhaseSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
                 if isStopping {
@@ -160,10 +174,10 @@ struct LoopPlayerView: NSViewRepresentable {
                 } else {
                     isFadingOut = false
                 }
-                if !wasPlaying {
-                    syncVideoToClock(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, startOffset: startOffset, duration: duration, force: true)
+                if !wasPlaying || syncOffsetChanged {
+                    syncVideoToClock(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, startOffset: startOffset, duration: duration, videoSyncOffset: videoSyncOffset, force: true)
                 } else {
-                    syncVideoToClock(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, startOffset: startOffset, duration: duration, force: false)
+                    syncVideoToClock(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, startOffset: startOffset, duration: duration, videoSyncOffset: videoSyncOffset, force: false)
                 }
                 player?.play()
                 if !isStopping {
@@ -181,10 +195,11 @@ struct LoopPlayerView: NSViewRepresentable {
             syncTimeUpdatedAt: Date,
             startOffset: TimeInterval,
             duration: TimeInterval,
+            videoSyncOffset: TimeInterval,
             force: Bool
         ) {
             guard let player, duration > 0 else { return }
-            let targetSeconds = targetVideoSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
+            let targetSeconds = targetVideoSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration, videoSyncOffset: videoSyncOffset)
             guard targetSeconds.isFinite, targetSeconds >= 0 else { return }
             let crossedBoundary = didAudioPhaseWrap(targetSeconds: targetSeconds, duration: duration)
             if !force, !crossedBoundary, targetSeconds >= 0.025, Date().timeIntervalSince(lastSyncCorrection) < 0.35 {
@@ -281,9 +296,17 @@ struct LoopPlayerView: NSViewRepresentable {
             return phase.isFinite && phase >= 0 ? phase : 0
         }
 
-        private func targetVideoSeconds(syncTime: TimeInterval, syncTimeUpdatedAt: Date, duration: TimeInterval) -> TimeInterval {
+        private func targetVideoSeconds(
+            syncTime: TimeInterval,
+            syncTimeUpdatedAt: Date,
+            duration: TimeInterval,
+            videoSyncOffset: TimeInterval
+        ) -> TimeInterval {
             guard duration > 0 else { return 0 }
-            return audioPhaseSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
+            let phase = audioPhaseSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
+            let adjusted = phase + videoSyncOffset
+            let wrapped = adjusted.truncatingRemainder(dividingBy: duration)
+            return wrapped >= 0 ? wrapped : wrapped + duration
         }
 
         private func didAudioPhaseWrap(targetSeconds: TimeInterval, duration: TimeInterval) -> Bool {
@@ -295,22 +318,43 @@ struct LoopPlayerView: NSViewRepresentable {
 }
 
 final class PlayerHostView: NSView {
+    let playerLayer = AVPlayerLayer()
+
+    var videoZoom: CGFloat = 1 {
+        didSet {
+            if abs(videoZoom - oldValue) > 0.001 {
+                needsLayout = true
+            }
+        }
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        layer?.masksToBounds = true
+        playerLayer.videoGravity = .resizeAspectFill
+        layer?.addSublayer(playerLayer)
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         wantsLayer = true
+        layer?.masksToBounds = true
+        playerLayer.videoGravity = .resizeAspectFill
+        layer?.addSublayer(playerLayer)
     }
 
-    override func makeBackingLayer() -> CALayer {
-        AVPlayerLayer()
-    }
-
-    var playerLayer: AVPlayerLayer {
-        layer as! AVPlayerLayer
+    override func layout() {
+        super.layout()
+        let zoom = max(1, videoZoom)
+        let width = bounds.width * zoom
+        let height = bounds.height * zoom
+        playerLayer.frame = CGRect(
+            x: bounds.midX - width / 2,
+            y: bounds.midY - height / 2,
+            width: width,
+            height: height
+        )
     }
 }
 

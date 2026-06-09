@@ -875,6 +875,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     private func configureMovieOutputForHighQuality() {
         guard let connection = movieOutput.connection(with: .video) else { return }
+        movieOutput.connection(with: .audio)?.isEnabled = false
         let videoDevice = videoDevices.first(where: { $0.uniqueID == selectedDeviceID }) ?? videoDevices.first
         let dimensions = videoDevice.map { CMVideoFormatDescriptionGetDimensions($0.activeFormat.formatDescription) }
         let width = Int(dimensions?.width ?? 1920)

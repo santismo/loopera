@@ -1203,11 +1203,12 @@ private struct LoopTile: View {
                     isPlaying: slot.isPlaying,
                     isStopping: slot.isStopping,
                     audioOutputDeviceID: audioOutputDeviceID,
+                    videoZoom: max(1, slot.videoZoom),
+                    videoSyncOffset: offsetProfile.videoStartOffsetMilliseconds / 1000,
                     playbackClock: playbackClock,
                     syncTime: syncTime,
                     syncTimeUpdatedAt: syncTimeUpdatedAt
                 )
-                    .scaleEffect(max(1, slot.videoZoom))
                     .clipShape(tileShape)
                     .shadow(color: .black.opacity(editMode ? 0 : 0.45), radius: editMode ? 0 : 16, y: editMode ? 0 : 8)
             } else {
@@ -1228,7 +1229,7 @@ private struct LoopTile: View {
     }
 
     private var effectiveVideoStartOffset: TimeInterval {
-        max(0, slot.startOffset + offsetProfile.videoStartOffsetMilliseconds / 1000)
+        max(0, slot.startOffset)
     }
 
     private var ringColor: Color? {
