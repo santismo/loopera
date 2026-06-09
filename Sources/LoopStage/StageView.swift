@@ -70,6 +70,28 @@ struct StageView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                             .zIndex(10)
                     }
+
+                    if showOffsetSettings {
+                        OffsetSettingsView(
+                            profile: $offsetDraft,
+                            apply: { profile in
+                                capture.applyOffsetProfile(profile)
+                            },
+                            save: { profile in
+                                capture.saveOffsetProfile(profile)
+                            },
+                            close: {
+                                showOffsetSettings = false
+                            }
+                        )
+                        .padding(12)
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: canvasMode == .portrait ? .topLeading : .topTrailing
+                        )
+                        .zIndex(11)
+                    }
                 }
             }
 
@@ -102,17 +124,6 @@ struct StageView: View {
                 performance.appendLiveAudio(input: input, sampleRate: sampleRate, presentationTime: presentationTime)
             }
             capture.requestAccessAndStart()
-        }
-        .sheet(isPresented: $showOffsetSettings) {
-            OffsetSettingsView(
-                profile: $offsetDraft,
-                apply: { profile in
-                    capture.applyOffsetProfile(profile)
-                },
-                save: { profile in
-                    capture.saveOffsetProfile(profile)
-                }
-            )
         }
         .sheet(isPresented: $showSaveLayout) {
             SaveLayoutView(
@@ -455,6 +466,12 @@ struct StageView: View {
         NSApp.keyWindow?.toggleFullScreen(nil)
     }
 
+    private func closeEditMode() {
+        editMode = false
+        editMenuOffset = .zero
+        capture.status = "Edit mode off."
+    }
+
     private func openPerformanceFolder() {
         NSWorkspace.shared.open(PerformanceRecorder.recordingsDirectory)
     }
@@ -473,15 +490,26 @@ struct StageView: View {
     private var editControlsOverlay: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
-                    .font(.system(size: 12, weight: .semibold))
-                Spacer(minLength: 0)
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+                .gesture(editMenuDragGesture)
+                .help("Drag edit menu")
+
+                Button {
+                    closeEditMode()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .buttonStyle(.plain)
+                .help("Close edit menu")
             }
             .foregroundStyle(.white.opacity(0.7))
             .frame(height: 16)
-            .contentShape(Rectangle())
-            .gesture(editMenuDragGesture)
-            .help("Drag edit menu")
 
             HStack(spacing: 6) {
                 Button {
@@ -968,6 +996,10 @@ struct StageView: View {
         }
 
         if editMode {
+            if press.key == .escape {
+                closeEditMode()
+                return .handled
+            }
             if press.key == .delete || press.key == .deleteForward {
                 capture.deleteSelected()
                 return .handled
@@ -1020,6 +1052,10 @@ struct StageView: View {
         }
 
         if editMode {
+            if event.keyCode == 53 {
+                closeEditMode()
+                return true
+            }
             if event.keyCode == 51 || event.keyCode == 117 {
                 capture.deleteSelected()
                 return true
