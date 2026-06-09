@@ -69,12 +69,90 @@ enum AppWindowSourceStore {
     }
 
     static func snapshot(windowID: CGWindowID) -> CGImage? {
-        CGWindowListCreateImage(
+        let direct = CGWindowListCreateImage(
             .null,
             .optionIncludingWindow,
             windowID,
             [.boundsIgnoreFraming, .bestResolution]
         )
+        if let direct, !isEffectivelyBlack(direct) {
+            return direct
+        }
+        return visibleDisplaySnapshot(windowID: windowID) ?? direct
+    }
+
+    private static func visibleDisplaySnapshot(windowID: CGWindowID) -> CGImage? {
+        guard let bounds = bounds(for: windowID), bounds.width > 0, bounds.height > 0 else {
+            return nil
+        }
+
+        var displayCount: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &displayCount) == .success, displayCount > 0 else {
+            return nil
+        }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
+        guard CGGetActiveDisplayList(displayCount, &displays, &displayCount) == .success else {
+            return nil
+        }
+
+        let candidates = displays.compactMap { display -> (CGDirectDisplayID, CGRect, CGRect)? in
+            let displayBounds = CGDisplayBounds(display)
+            let intersection = bounds.intersection(displayBounds)
+            guard intersection.width > 1, intersection.height > 1 else { return nil }
+            return (display, displayBounds, intersection)
+        }
+        guard let best = candidates.max(by: { $0.2.width * $0.2.height < $1.2.width * $1.2.height }),
+              let displayImage = CGDisplayCreateImage(best.0)
+        else { return nil }
+
+        let scaleX = CGFloat(displayImage.width) / max(1, best.1.width)
+        let scaleY = CGFloat(displayImage.height) / max(1, best.1.height)
+        let cropRect = CGRect(
+            x: (best.2.minX - best.1.minX) * scaleX,
+            y: (best.2.minY - best.1.minY) * scaleY,
+            width: best.2.width * scaleX,
+            height: best.2.height * scaleY
+        )
+        .integral
+        .intersection(CGRect(x: 0, y: 0, width: displayImage.width, height: displayImage.height))
+
+        guard cropRect.width > 0, cropRect.height > 0 else { return nil }
+        return displayImage.cropping(to: cropRect)
+    }
+
+    private static func bounds(for windowID: CGWindowID) -> CGRect? {
+        guard let entries = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
+              let boundsInfo = entries.first?[kCGWindowBounds as String] as? [String: Any]
+        else { return nil }
+        return CGRect(dictionaryRepresentation: boundsInfo as CFDictionary)
+    }
+
+    private static func isEffectivelyBlack(_ image: CGImage) -> Bool {
+        let width = 16
+        let height = 16
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return false }
+
+        context.interpolationQuality = .low
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        var brightPixels = 0
+        for index in stride(from: 0, to: pixels.count, by: 4) {
+            let red = Int(pixels[index])
+            let green = Int(pixels[index + 1])
+            let blue = Int(pixels[index + 2])
+            if red + green + blue > 24 {
+                brightPixels += 1
+            }
+        }
+        return brightPixels < 3
     }
 }
 
