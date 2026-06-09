@@ -9,7 +9,7 @@ enum LoopFadeMode: String, Codable, CaseIterable, Identifiable {
 }
 
 struct OffsetProfile: Codable, Equatable {
-    var videoStartOffsetMilliseconds: Double = -35
+    var videoStartOffsetMilliseconds: Double = -75
     var audioStopOffsetMilliseconds: Double = 0
     var crossfadeMilliseconds: Double = 45
     var loopFadeOutMilliseconds: Double = 180
@@ -22,11 +22,11 @@ enum OffsetProfileStore {
         if let key = key(audioDeviceID: audioDeviceID, videoDeviceID: videoDeviceID),
            let data = defaults.data(forKey: key),
            let profile = try? JSONDecoder().decode(OffsetProfile.self, from: data) {
-            return profile
+            return migrateDefaultVideoOffsetIfNeeded(profile)
         }
         if let data = defaults.data(forKey: defaultKey),
            let profile = try? JSONDecoder().decode(OffsetProfile.self, from: data) {
-            return profile
+            return migrateDefaultVideoOffsetIfNeeded(profile)
         }
         return OffsetProfile()
     }
@@ -41,6 +41,17 @@ enum OffsetProfileStore {
     }
 
     private static let defaultKey = "Loopera.offsetProfile.default"
+    private static let previousDefaultVideoStartOffsetMilliseconds = -35.0
+    private static let currentDefaultVideoStartOffsetMilliseconds = -75.0
+
+    private static func migrateDefaultVideoOffsetIfNeeded(_ profile: OffsetProfile) -> OffsetProfile {
+        guard abs(profile.videoStartOffsetMilliseconds - previousDefaultVideoStartOffsetMilliseconds) < 0.001 else {
+            return profile
+        }
+        var migrated = profile
+        migrated.videoStartOffsetMilliseconds = currentDefaultVideoStartOffsetMilliseconds
+        return migrated
+    }
 
     private static func key(audioDeviceID: String?, videoDeviceID: String?) -> String? {
         let audio = audioDeviceID?.isEmpty == false ? audioDeviceID! : "no-audio"

@@ -58,7 +58,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         let stageAspect = max(1, view.bounds.width) / max(1, view.bounds.height)
         let scale = view.window?.backingScaleFactor ?? view.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
         let sourceSize = CGSize(width: view.bounds.width * scale, height: view.bounds.height * scale)
-        let size = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, minimumLongEdge: 2560, longEdgeLimit: 3840)
+        let size = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, longEdgeLimit: 2560)
         var width = Int(size.width)
         var height = Int(size.height)
         let outputURL = Self.recordingsDirectory
@@ -73,7 +73,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
                 try prepareWriter(outputURL: outputURL, width: width, height: height, codec: .h264)
             } catch {
                 cleanupWriter()
-                let fallbackSize = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, minimumLongEdge: 1920, longEdgeLimit: 1920)
+                let fallbackSize = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, longEdgeLimit: 1920)
                 width = Int(fallbackSize.width)
                 height = Int(fallbackSize.height)
                 try prepareWriter(outputURL: outputURL, width: width, height: height, codec: .h264)
@@ -195,12 +195,11 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private static func recordingSize(
         aspect: CGFloat,
         sourceSize: CGSize,
-        minimumLongEdge: Double,
         longEdgeLimit: Double
     ) -> CGSize {
         let sourceAspect = Double(max(0.1, aspect))
         let sourceLongEdge = max(Double(sourceSize.width), Double(sourceSize.height))
-        let longEdge = min(longEdgeLimit, max(minimumLongEdge, sourceLongEdge))
+        let longEdge = min(longEdgeLimit, max(16, sourceLongEdge))
         let shortEdge: Double
         let width: Double
         let height: Double
