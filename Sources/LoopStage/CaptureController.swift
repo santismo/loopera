@@ -185,22 +185,21 @@ final class CaptureController: NSObject, ObservableObject {
 
     func refreshAppWindowSources() {
         appWindowCaptureAccessGranted = AppWindowSourceStore.hasScreenCaptureAccess
-        guard appWindowCaptureAccessGranted else {
-            appWindowSources = []
-            selectedAppWindowID = nil
-            status = "Screen Recording permission is needed for app windows. Enable it, then quit and reopen Loopera."
-            return
-        }
-
         appWindowSources = AppWindowSourceStore.currentWindows()
         if let selectedAppWindowID,
            appWindowSources.contains(where: { $0.id == selectedAppWindowID }) {
             return
         }
         selectedAppWindowID = appWindowSources.first?.id
-        status = appWindowSources.isEmpty
-            ? "No app windows found. Bring the source app out of fullscreen or refresh windows."
-            : "Found \(appWindowSources.count) app window(s)."
+        if appWindowSources.isEmpty {
+            status = appWindowCaptureAccessGranted
+                ? "No app windows found. Bring the source app out of fullscreen or refresh windows."
+                : "No app windows found. Screen Recording may need Loopera removed and re-added in System Settings."
+        } else if appWindowCaptureAccessGranted {
+            status = "Found \(appWindowSources.count) app window(s)."
+        } else {
+            status = "Found \(appWindowSources.count) app window(s). If preview is blank, remove/re-add Loopera in Screen Recording."
+        }
     }
 
     func selectVideoInputMode(_ mode: VideoInputMode) {
