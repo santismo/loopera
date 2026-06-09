@@ -21,9 +21,18 @@ struct AppWindowSource: Identifiable, Hashable {
 }
 
 enum AppWindowSourceStore {
+    static var hasScreenCaptureAccess: Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    @discardableResult
+    static func requestScreenCaptureAccess() -> Bool {
+        CGRequestScreenCaptureAccess()
+    }
+
     static func currentWindows(excludingProcessID: pid_t = ProcessInfo.processInfo.processIdentifier) -> [AppWindowSource] {
         guard let entries = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements],
+            [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else {
             return []

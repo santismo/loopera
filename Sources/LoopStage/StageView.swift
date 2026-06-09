@@ -463,13 +463,23 @@ struct StageView: View {
             .frame(width: 180)
         } else {
             Menu {
+                if !capture.appWindowCaptureAccessGranted {
+                    Button {
+                        capture.requestAppWindowCaptureAccess()
+                    } label: {
+                        Label("Request Screen Recording", systemImage: "lock.open")
+                    }
+                    Divider()
+                }
                 Button {
                     capture.refreshAppWindowSources()
                 } label: {
                     Label("Refresh Windows", systemImage: "arrow.clockwise")
                 }
                 Divider()
-                if capture.appWindowSources.isEmpty {
+                if !capture.appWindowCaptureAccessGranted {
+                    Text("Quit and reopen after enabling permission")
+                } else if capture.appWindowSources.isEmpty {
                     Text("No Windows")
                 } else {
                     ForEach(capture.appWindowSources) { source in

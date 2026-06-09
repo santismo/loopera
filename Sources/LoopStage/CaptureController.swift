@@ -42,6 +42,7 @@ final class CaptureController: NSObject, ObservableObject {
     @Published var videoInputMode: VideoInputMode = .camera
     @Published private(set) var appWindowSources: [AppWindowSource] = []
     @Published var selectedAppWindowID: CGWindowID?
+    @Published private(set) var appWindowCaptureAccessGranted = AppWindowSourceStore.hasScreenCaptureAccess
     private var currentVideoZoom = 1.0
 
     private let movieOutput = AVCaptureMovieFileOutput()
@@ -183,20 +184,40 @@ final class CaptureController: NSObject, ObservableObject {
     }
 
     func refreshAppWindowSources() {
+        appWindowCaptureAccessGranted = AppWindowSourceStore.hasScreenCaptureAccess
+        guard appWindowCaptureAccessGranted else {
+            appWindowSources = []
+            selectedAppWindowID = nil
+            status = "Screen Recording permission is needed for app windows. Enable it, then quit and reopen Loopera."
+            return
+        }
+
         appWindowSources = AppWindowSourceStore.currentWindows()
         if let selectedAppWindowID,
            appWindowSources.contains(where: { $0.id == selectedAppWindowID }) {
             return
         }
         selectedAppWindowID = appWindowSources.first?.id
+        status = appWindowSources.isEmpty
+            ? "No app windows found. Bring the source app out of fullscreen or refresh windows."
+            : "Found \(appWindowSources.count) app window(s)."
     }
 
     func selectVideoInputMode(_ mode: VideoInputMode) {
         videoInputMode = mode
         if mode == .appWindow {
+            if !AppWindowSourceStore.hasScreenCaptureAccess {
+                appWindowCaptureAccessGranted = AppWindowSourceStore.requestScreenCaptureAccess()
+            }
             refreshAppWindowSources()
+        } else {
+            status = "Video source: \(mode.rawValue)."
         }
-        status = "Video source: \(mode.rawValue)."
+    }
+
+    func requestAppWindowCaptureAccess() {
+        appWindowCaptureAccessGranted = AppWindowSourceStore.requestScreenCaptureAccess()
+        refreshAppWindowSources()
     }
 
     func selectAppWindow(_ windowID: CGWindowID) {

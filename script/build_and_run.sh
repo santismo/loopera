@@ -56,6 +56,8 @@ cat >"$INFO_PLIST" <<PLIST
   <true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>Loopera needs microphone access to record audio into video loops.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Loopera needs screen recording access to capture selected app windows as video loop sources.</string>
 </dict>
 </plist>
 PLIST
