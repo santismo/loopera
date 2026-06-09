@@ -679,6 +679,7 @@ final class CaptureController: NSObject, ObservableObject {
             let previousBoundaryGrace = beat * 1.5
             if currentRecordingDuration >= masterDuration,
                sincePreviousBoundary > 0,
+               sincePreviousBoundary <= untilNextBoundary,
                sincePreviousBoundary <= previousBoundaryGrace {
                 pendingStopTrimEndSeconds = sincePreviousBoundary
                 pendingStopOnMasterBoundary = false
