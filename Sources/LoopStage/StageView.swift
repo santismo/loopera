@@ -28,12 +28,14 @@ struct StageView: View {
     @State private var offsetDraft = OffsetProfile()
     @State private var offsetMenuID = UUID()
     @State private var editPanelOffset = CGSize.zero
+    @State private var toolbarResetID = UUID()
     @GestureState private var editPanelDrag = CGSize.zero
     @FocusState private var focusedField: StageFocusedField?
 
     var body: some View {
         VStack(spacing: 0) {
             toolbar
+                .id(toolbarResetID)
 
             GeometryReader { proxy in
                 let canvasSize = stageCanvasSize(in: proxy.size)
@@ -445,6 +447,9 @@ struct StageView: View {
     private var layoutPresetControls: some View {
         HStack(spacing: 6) {
             Button {
+                if editMode {
+                    closeEditMode()
+                }
                 layoutName = normalizedLayoutName(layoutName)
                 showSaveLayout = true
             } label: {
@@ -453,6 +458,9 @@ struct StageView: View {
             .help("Save layout as")
 
             Button {
+                if editMode {
+                    closeEditMode()
+                }
                 updateCurrentLayout()
             } label: {
                 Label("Update", systemImage: "checkmark")
@@ -495,8 +503,12 @@ struct StageView: View {
     private func closeEditMode() {
         focusedField = nil
         editMode = false
+        toolbarResetID = UUID()
         capture.status = "Edit mode off."
         DispatchQueue.main.async {
+            NSApp.keyWindow?.makeFirstResponder(nil)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             NSApp.keyWindow?.makeFirstResponder(nil)
         }
     }

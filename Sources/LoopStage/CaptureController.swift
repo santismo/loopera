@@ -710,6 +710,9 @@ final class CaptureController: NSObject, ObservableObject {
         let currentRecordingDuration = recordingSlotIndex.flatMap {
             audioLoopEngine.currentRecordingDuration(slot: $0)
         } ?? 0
+        // Slave audio must finish to an exact master multiple. Keep
+        // pendingStopTargetDuration in sync with every immediate/scheduled stop;
+        // otherwise the UI can show a quantized length while the audio buffer drifts.
         if let metronomeGridBPM, metronomeGridStartDate != nil {
             let beat = 60.0 / metronomeGridBPM
             let previousBoundaryGrace = beat * 1.5
@@ -719,7 +722,11 @@ final class CaptureController: NSObject, ObservableObject {
                sincePreviousBoundary <= previousBoundaryGrace {
                 pendingStopTrimEndSeconds = sincePreviousBoundary
                 pendingStopOnMasterBoundary = false
-                pendingStopTargetDuration = nil
+                pendingStopTargetDuration = slaveTargetDuration(
+                    currentDuration: currentRecordingDuration,
+                    trimEndSeconds: sincePreviousBoundary,
+                    masterDuration: masterDuration
+                )
                 stopRecordingNow()
             } else {
                 scheduleStopAtMasterLength(currentDuration: currentRecordingDuration, masterDuration: masterDuration)
@@ -732,11 +739,31 @@ final class CaptureController: NSObject, ObservableObject {
            sincePreviousBoundary > 0 {
             pendingStopTrimEndSeconds = sincePreviousBoundary
             pendingStopOnMasterBoundary = false
-            pendingStopTargetDuration = nil
+            pendingStopTargetDuration = slaveTargetDuration(
+                currentDuration: currentRecordingDuration,
+                trimEndSeconds: sincePreviousBoundary,
+                masterDuration: masterDuration
+            )
             stopRecordingNow()
         } else {
             scheduleStopAtMasterLength(currentDuration: currentRecordingDuration, masterDuration: masterDuration)
         }
+    }
+
+    private func slaveTargetDuration(
+        currentDuration: TimeInterval,
+        trimEndSeconds: TimeInterval,
+        masterDuration: TimeInterval
+    ) -> TimeInterval? {
+        guard currentDuration.isFinite,
+              trimEndSeconds.isFinite,
+              masterDuration.isFinite,
+              masterDuration > 0
+        else { return nil }
+
+        let effectiveDuration = max(0, currentDuration - max(0, trimEndSeconds))
+        let multiple = max(1, Int((effectiveDuration / masterDuration).rounded()))
+        return Double(multiple) * masterDuration
     }
 
     private func scheduleStopAtMasterLength(currentDuration: TimeInterval, masterDuration: TimeInterval) {
@@ -783,6 +810,7 @@ final class CaptureController: NSObject, ObservableObject {
         if let recordingSlotIndex {
             let trimStartSeconds = recordingSlotIndex == 1 ? pendingStartTrimSeconds : 0
             var trimEndSeconds = pendingStopTrimEndSeconds
+            let targetDuration = recordingSlotIndex == 1 ? nil : pendingStopTargetDuration
             if recordingSlotIndex == 1 {
                 trimEndSeconds = max(0, trimEndSeconds + offsetProfile.audioStopOffsetMilliseconds / 1000)
                 if let metronomeGridBPM,
@@ -796,7 +824,8 @@ final class CaptureController: NSObject, ObservableObject {
             let duration = audioLoopEngine.finishRecording(
                 slot: recordingSlotIndex,
                 trimStartSeconds: trimStartSeconds,
-                trimEndSeconds: trimEndSeconds
+                trimEndSeconds: trimEndSeconds,
+                targetDurationSeconds: targetDuration
             )
             completedAudioDurations[recordingSlotIndex] = duration
             completedVideoEndTrims[recordingSlotIndex] = trimEndSeconds
@@ -819,7 +848,10 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStopTargetDuration = nil
         pendingStartTrimSeconds = 0
         if shouldStopMovie {
-            movieOutput.stopRecording()
+            Task { @MainActor [weak self] in
+                guard let self, self.movieOutput.isRecording else { return }
+                self.movieOutput.stopRecording()
+            }
         }
         status = audioLoopCompleted ? "Audio loop playing. Finishing video..." : "Finishing loop..."
     }

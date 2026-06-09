@@ -50,7 +50,8 @@ enum LayoutPresetStore {
     }
 
     static func url(for name: String) -> URL {
-        directoryURL.appendingPathComponent(fileName(for: name)).appendingPathExtension("json")
+        existingURL(for: name) ??
+            directoryURL.appendingPathComponent(fileName(for: name)).appendingPathExtension("json")
     }
 
     static func savedNames() -> [String] {
@@ -67,7 +68,28 @@ enum LayoutPresetStore {
     }
 
     static func exists(name: String) -> Bool {
-        FileManager.default.fileExists(atPath: url(for: name).path)
+        existingURL(for: name) != nil
+    }
+
+    private static func existingURL(for name: String) -> URL? {
+        let normalizedName = normalizedDisplayName(name)
+        let preferred = directoryURL.appendingPathComponent(fileName(for: name)).appendingPathExtension("json")
+        if FileManager.default.fileExists(atPath: preferred.path) {
+            return preferred
+        }
+
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        return urls.first { url in
+            guard url.pathExtension == "json" else { return false }
+            let storedName = url.deletingPathExtension().lastPathComponent
+            return normalizedDisplayName(storedName) == normalizedName ||
+                normalizedDisplayName(displayName(for: storedName)) == normalizedName
+        }
     }
 
     private static func fileName(for name: String) -> String {
@@ -81,5 +103,15 @@ enum LayoutPresetStore {
 
     private static func displayName(for fileName: String) -> String {
         fileName.replacingOccurrences(of: "-", with: " ")
+    }
+
+    private static func normalizedDisplayName(_ name: String) -> String {
+        name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .lowercased()
     }
 }

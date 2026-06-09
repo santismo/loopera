@@ -137,7 +137,12 @@ final class AudioLoopEngine: @unchecked Sendable {
         lock.unlock()
     }
 
-    func finishRecording(slot: Int, trimStartSeconds: TimeInterval = 0, trimEndSeconds: TimeInterval = 0) -> TimeInterval? {
+    func finishRecording(
+        slot: Int,
+        trimStartSeconds: TimeInterval = 0,
+        trimEndSeconds: TimeInterval = 0,
+        targetDurationSeconds: TimeInterval? = nil
+    ) -> TimeInterval? {
         lock.lock()
         defer { lock.unlock() }
         let startSamples = max(0, Int(sampleRate * trimStartSeconds))
@@ -145,15 +150,19 @@ final class AudioLoopEngine: @unchecked Sendable {
         let availableCount = min(recordBufferLeft.count, recordBufferRight.count)
         let trimmedAvailableCount = max(0, availableCount - startSamples - trimSamples)
         var count = trimmedAvailableCount
-        var targetCount: Int?
+        var targetCount = targetDurationSeconds
+            .flatMap { $0.isFinite && $0 > 0 ? max(1, Int(($0 * sampleRate).rounded())) : nil }
         if slot != 1,
+           targetCount == nil,
            let master = loops[1] {
             let masterLength = min(master.left.count, master.right.count)
             if masterLength > 0 {
                 let multiple = max(1, Int((Double(count) / Double(masterLength)).rounded()))
                 targetCount = multiple * masterLength
-                count = min(trimmedAvailableCount, multiple * masterLength)
             }
+        }
+        if let targetCount {
+            count = min(trimmedAvailableCount, targetCount)
         }
         guard recordingSlot == slot, count > Int(sampleRate * 0.08) else {
             recordingSlot = nil
@@ -165,15 +174,30 @@ final class AudioLoopEngine: @unchecked Sendable {
         }
 
         let end = min(availableCount, startSamples + count)
-        var left = Array(recordBufferLeft[startSamples..<end])
-        var right = Array(recordBufferRight[startSamples..<end])
+        let canMoveWholeRecording = startSamples == 0 &&
+            end == availableCount &&
+            count == availableCount &&
+            targetCount == nil &&
+            recordBufferLeft.count == recordBufferRight.count
+        var left: [Float]
+        var right: [Float]
+        if canMoveWholeRecording {
+            // Free-mode master stop must hand the captured buffers to playback immediately.
+            // Avoiding Array(slice) here prevents a short audio gap on the spacebar release.
+            left = recordBufferLeft
+            right = recordBufferRight
+            recordBufferLeft = []
+            recordBufferRight = []
+        } else {
+            left = Array(recordBufferLeft[startSamples..<end])
+            right = Array(recordBufferRight[startSamples..<end])
+        }
         if let targetCount, targetCount > count {
-            let shortfall = targetCount - count
-            let maxPadSamples = max(128, Int(sampleRate * 0.025))
-            if shortfall <= maxPadSamples {
-                padLoopBuffers(left: &left, right: &right, targetCount: targetCount)
-                count = targetCount
-            }
+            // Slave loops are defined by the master sample grid. If the UI timer asks to
+            // close at a master boundary but the render thread is a few buffers short,
+            // pad to the exact target instead of creating a drifting shorter loop.
+            padLoopBuffers(left: &left, right: &right, targetCount: targetCount)
+            count = targetCount
         }
         loops[slot] = Loop(
             left: left,
