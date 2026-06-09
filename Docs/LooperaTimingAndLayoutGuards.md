@@ -3,6 +3,10 @@
 These are regression-prone paths. Check them before changing looper timing,
 video finalization, edit mode, or layout preset code.
 
+The known-good audio looping milestone is tagged in git as
+`perfect-audio-looping-savepoint`. Return to that tag when comparing future
+audio timing regressions.
+
 ## Master Loop Stop
 
 - Free-mode master stop must call `AudioLoopEngine.finishRecording` and restart
@@ -43,6 +47,10 @@ video finalization, edit mode, or layout preset code.
 - Captured loop video zoom should match the saved live preview zoom. Do not
   attenuate the loop zoom relative to the live preview unless the UI exposes that
   as a separate user setting.
+- Camera capture and app-window capture are separate video source paths. Keep
+  app-window recording video-only and attach the resulting file through the same
+  finished-video slot finalization path; do not alter the audio engine for a new
+  visual source.
 
 ## Layout/Edit Controls
 

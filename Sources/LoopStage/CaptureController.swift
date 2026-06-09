@@ -1,3 +1,4 @@
+import AppKit
 @preconcurrency import AVFoundation
 import Foundation
 
@@ -38,9 +39,13 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var loopPlaybackTimeUpdatedAt = Date()
     @Published private(set) var waveformSnapshots: [AudioLoopEngine.WaveformSnapshot] = []
     @Published private(set) var videoFormatStatus = ""
+    @Published var videoInputMode: VideoInputMode = .camera
+    @Published private(set) var appWindowSources: [AppWindowSource] = []
+    @Published var selectedAppWindowID: CGWindowID?
     private var currentVideoZoom = 1.0
 
     private let movieOutput = AVCaptureMovieFileOutput()
+    private let appWindowLoopRecorder = AppWindowLoopRecorder()
     private let audioMeterOutput = AVCaptureAudioDataOutput()
     private let audioMeterQueue = DispatchQueue(label: "Loopera.AudioMeter")
     private let audioLoopEngine = AudioLoopEngine()
@@ -55,6 +60,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var completedVideoEndTrims: [Int: TimeInterval] = [:]
     private var completedVideoStartTrims: [Int: TimeInterval] = [:]
     private var recordingSlotByOutputURL: [URL: Int] = [:]
+    private var activeVideoRecordingMode: VideoInputMode?
     private var pendingStopOnMasterBoundary = false
     private var pendingStopTrimEndSeconds: TimeInterval = 0
     private var pendingStartTrimSeconds: TimeInterval = 0
@@ -142,6 +148,7 @@ final class CaptureController: NSObject, ObservableObject {
         if movieOutput.isRecording {
             movieOutput.stopRecording()
         }
+        appWindowLoopRecorder.stopDiscarding()
         session.stopRunning()
         isRecording = false
     }
@@ -154,6 +161,7 @@ final class CaptureController: NSObject, ObservableObject {
         ).devices
 
         audioDevices = AVCaptureDevice.devices(for: .audio)
+        refreshAppWindowSources()
 
         if selectedDeviceID.isEmpty || !videoDevices.contains(where: { $0.uniqueID == selectedDeviceID }) {
             selectedDeviceID = videoDevices.first?.uniqueID ?? ""
@@ -172,6 +180,28 @@ final class CaptureController: NSObject, ObservableObject {
         }
 
         status = "Found \(videoDevices.count) camera input(s), \(audioDevices.count) audio input(s)."
+    }
+
+    func refreshAppWindowSources() {
+        appWindowSources = AppWindowSourceStore.currentWindows()
+        if let selectedAppWindowID,
+           appWindowSources.contains(where: { $0.id == selectedAppWindowID }) {
+            return
+        }
+        selectedAppWindowID = appWindowSources.first?.id
+    }
+
+    func selectVideoInputMode(_ mode: VideoInputMode) {
+        videoInputMode = mode
+        if mode == .appWindow {
+            refreshAppWindowSources()
+        }
+        status = "Video source: \(mode.rawValue)."
+    }
+
+    func selectAppWindow(_ windowID: CGWindowID) {
+        selectedAppWindowID = windowID
+        status = "App window selected."
     }
 
     func selectDevice(_ uniqueID: String) {
@@ -248,14 +278,14 @@ final class CaptureController: NSObject, ObservableObject {
                recordingSlotIndex == number,
                thresholdDate == nil {
                 recordingSlotIndex = nil
-                movieOutput.stopRecording()
+                stopActiveVideoRecording()
                 isRecording = false
             }
             if slots[slotPosition].state == .armed,
                isRecording,
                recordingSlotIndex == number {
                 recordingSlotIndex = nil
-                movieOutput.stopRecording()
+                stopActiveVideoRecording()
                 isRecording = false
             }
             slots[slotPosition].state = .empty
@@ -611,9 +641,12 @@ final class CaptureController: NSObject, ObservableObject {
         recordingSlotIndex = number
         slots[slotPosition].state = .recording
         audioLoopEngine.beginRecording(slot: number, usePreBuffer: false)
-        configureMovieOutputForHighQuality()
-        recordingSlotByOutputURL[outputURL] = number
-        movieOutput.startRecording(to: outputURL, recordingDelegate: self)
+        guard startLoopVideoRecording(to: outputURL, slot: number) else {
+            audioLoopEngine.clear(slot: number)
+            slots[slotPosition].state = .empty
+            recordingSlotIndex = nil
+            return
+        }
         isRecording = true
         status = "Recording slot \(number)..."
 
@@ -657,9 +690,11 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStartTrimSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .armed
-        configureMovieOutputForHighQuality()
-        recordingSlotByOutputURL[outputURL] = number
-        movieOutput.startRecording(to: outputURL, recordingDelegate: self)
+        guard startLoopVideoRecording(to: outputURL, slot: number) else {
+            slots[slotPosition].state = .empty
+            recordingSlotIndex = nil
+            return
+        }
         isRecording = true
         status = "Slot \(number) armed for the next master start."
     }
@@ -683,9 +718,12 @@ final class CaptureController: NSObject, ObservableObject {
         recordingSlotIndex = number
         slots[slotPosition].state = .listening
         audioLoopEngine.armThreshold(slot: number, preBufferMilliseconds: thresholdLeadMilliseconds)
-        configureMovieOutputForHighQuality()
-        recordingSlotByOutputURL[outputURL] = number
-        movieOutput.startRecording(to: outputURL, recordingDelegate: self)
+        guard startLoopVideoRecording(to: outputURL, slot: number) else {
+            audioLoopEngine.clear(slot: number)
+            slots[slotPosition].state = .empty
+            recordingSlotIndex = nil
+            return
+        }
         isRecording = true
         status = "Slot 1 listening for threshold."
     }
@@ -796,6 +834,7 @@ final class CaptureController: NSObject, ObservableObject {
         stopTask = nil
         isRecording = false
         let shouldStopMovie = movieOutput.isRecording
+        let shouldStopWindow = activeVideoRecordingMode == .appWindow
         var audioLoopCompleted = false
         if let recordingSlotIndex {
             let trimStartSeconds = recordingSlotIndex == 1 ? pendingStartTrimSeconds : 0
@@ -837,8 +876,45 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStartTrimSeconds = 0
         if shouldStopMovie {
             movieOutput.stopRecording()
+        } else if shouldStopWindow {
+            appWindowLoopRecorder.stop { [weak self] url, error in
+                Task { @MainActor in
+                    await self?.handleLoopVideoFinished(outputFileURL: url, error: error)
+                }
+            }
         }
         status = audioLoopCompleted ? "Audio loop playing. Finishing video..." : "Finishing loop..."
+    }
+
+    private func startLoopVideoRecording(to outputURL: URL, slot: Int) -> Bool {
+        recordingSlotByOutputURL[outputURL] = slot
+        activeVideoRecordingMode = videoInputMode
+        switch videoInputMode {
+        case .camera:
+            configureMovieOutputForHighQuality()
+            movieOutput.startRecording(to: outputURL, recordingDelegate: self)
+            return true
+        case .appWindow:
+            do {
+                try appWindowLoopRecorder.start(windowID: selectedAppWindowID, outputURL: outputURL)
+                return true
+            } catch {
+                recordingSlotByOutputURL[outputURL] = nil
+                activeVideoRecordingMode = nil
+                status = "Window video failed: \(error.localizedDescription)"
+                return false
+            }
+        }
+    }
+
+    private func stopActiveVideoRecording() {
+        if movieOutput.isRecording {
+            movieOutput.stopRecording()
+        }
+        if activeVideoRecordingMode == .appWindow {
+            appWindowLoopRecorder.stopDiscarding()
+        }
+        activeVideoRecordingMode = nil
     }
 
     private func markAudioLoopReady(slot number: Int, duration: TimeInterval?) {
@@ -1088,92 +1164,97 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
         error: Error?
     ) {
         Task { @MainActor in
-            isRecording = false
+            await handleLoopVideoFinished(outputFileURL: outputFileURL, error: error)
+        }
+    }
 
-            let finishedSlotIndex = recordingSlotByOutputURL.removeValue(forKey: outputFileURL) ?? recordingSlotIndex
-            guard let finishedSlotIndex, let slotPosition = slots.firstIndex(where: { $0.index == finishedSlotIndex }) else {
-                return
-            }
+    private func handleLoopVideoFinished(outputFileURL: URL, error: Error?) async {
+        isRecording = false
+        activeVideoRecordingMode = nil
 
-            if let error {
-                if completedAudioDurations[finishedSlotIndex] != nil {
-                    slots[slotPosition].url = nil
-                    status = "Video failed, audio loop kept: \(error.localizedDescription)"
-                    completedAudioDurations[finishedSlotIndex] = nil
-                    completedVideoEndTrims[finishedSlotIndex] = nil
-                    completedVideoStartTrims[finishedSlotIndex] = nil
-                    if recordingSlotIndex == finishedSlotIndex {
-                        self.recordingSlotIndex = nil
-                    }
-                } else {
-                    slots[slotPosition].state = .empty
-                    status = "Recording failed: \(error.localizedDescription)"
-                    if recordingSlotIndex == finishedSlotIndex {
-                        self.recordingSlotIndex = nil
-                    }
-                }
-                return
-            }
+        let finishedSlotIndex = recordingSlotByOutputURL.removeValue(forKey: outputFileURL) ?? recordingSlotIndex
+        guard let finishedSlotIndex, let slotPosition = slots.firstIndex(where: { $0.index == finishedSlotIndex }) else {
+            return
+        }
 
-            if slots[slotPosition].state == .listening, thresholdDate == nil {
-                slots[slotPosition].state = .empty
-                status = "Slot \(finishedSlotIndex) disarmed before threshold."
+        if let error {
+            if completedAudioDurations[finishedSlotIndex] != nil {
+                slots[slotPosition].url = nil
+                status = "Video failed, audio loop kept: \(error.localizedDescription)"
+                completedAudioDurations[finishedSlotIndex] = nil
+                completedVideoEndTrims[finishedSlotIndex] = nil
+                completedVideoStartTrims[finishedSlotIndex] = nil
                 if recordingSlotIndex == finishedSlotIndex {
                     self.recordingSlotIndex = nil
                 }
-                return
-            }
-
-            if slots[slotPosition].state == .empty ||
-                (slots[slotPosition].state == .armed && completedAudioDurations[finishedSlotIndex] == nil) {
-                if recordingSlotIndex == finishedSlotIndex {
-                    self.recordingSlotIndex = nil
-                }
-                return
-            }
-
-            let assetDuration = await measuredDuration(for: outputFileURL)
-            let engineDuration = completedAudioDurations[finishedSlotIndex]
-            let rawDuration = engineDuration
-                ?? assetDuration.map { max(0.25, $0) }
-                ?? Date().timeIntervalSince(pendingStartDate ?? Date())
-            let duration = quantizedLoopDuration(rawDuration, slot: finishedSlotIndex)
-            let endTrim = completedVideoEndTrims[finishedSlotIndex] ?? 0
-            let startTrim = completedVideoStartTrims[finishedSlotIndex] ?? 0
-            let mediaAlignedStartOffset = videoStartOffset(
-                assetDuration: assetDuration,
-                loopDuration: duration,
-                endTrim: endTrim
-            )
-            let startOffset: TimeInterval
-            if finishedSlotIndex == 1 {
-                startOffset = mediaAlignedStartOffset ?? loopStartOffset() + startTrim
             } else {
-                startOffset = mediaAlignedStartOffset
-                    ?? recordingStartOffset()
-                    ?? 0
+                slots[slotPosition].state = .empty
+                status = "Recording failed: \(error.localizedDescription)"
+                if recordingSlotIndex == finishedSlotIndex {
+                    self.recordingSlotIndex = nil
+                }
             }
-            slots[slotPosition].url = outputFileURL
-            slots[slotPosition].createdAt = Date()
-            slots[slotPosition].startOffset = startOffset
-            slots[slotPosition].videoZoom = currentVideoZoom
-            slots[slotPosition].duration = max(0.25, duration)
-            slots[slotPosition].state = .recorded
-            slots[slotPosition].isPlaying = true
-            slots[slotPosition].isStopping = false
-            slots[slotPosition].stoppingStartedAt = nil
-            slots[slotPosition].isMuted = false
-            if let phase = audioLoopEngine.phase(slot: finishedSlotIndex) {
-                loopPlaybackTimes[finishedSlotIndex] = phase * slots[slotPosition].duration
-            }
-            selectedSlotIndex = nil
-            status = "Slot \(finishedSlotIndex) captured."
-            completedAudioDurations[finishedSlotIndex] = nil
-            completedVideoEndTrims[finishedSlotIndex] = nil
-            completedVideoStartTrims[finishedSlotIndex] = nil
+            return
+        }
+
+        if slots[slotPosition].state == .listening, thresholdDate == nil {
+            slots[slotPosition].state = .empty
+            status = "Slot \(finishedSlotIndex) disarmed before threshold."
             if recordingSlotIndex == finishedSlotIndex {
                 self.recordingSlotIndex = nil
             }
+            return
+        }
+
+        if slots[slotPosition].state == .empty ||
+            (slots[slotPosition].state == .armed && completedAudioDurations[finishedSlotIndex] == nil) {
+            if recordingSlotIndex == finishedSlotIndex {
+                self.recordingSlotIndex = nil
+            }
+            return
+        }
+
+        let assetDuration = await measuredDuration(for: outputFileURL)
+        let engineDuration = completedAudioDurations[finishedSlotIndex]
+        let rawDuration = engineDuration
+            ?? assetDuration.map { max(0.25, $0) }
+            ?? Date().timeIntervalSince(pendingStartDate ?? Date())
+        let duration = quantizedLoopDuration(rawDuration, slot: finishedSlotIndex)
+        let endTrim = completedVideoEndTrims[finishedSlotIndex] ?? 0
+        let startTrim = completedVideoStartTrims[finishedSlotIndex] ?? 0
+        let mediaAlignedStartOffset = videoStartOffset(
+            assetDuration: assetDuration,
+            loopDuration: duration,
+            endTrim: endTrim
+        )
+        let startOffset: TimeInterval
+        if finishedSlotIndex == 1 {
+            startOffset = mediaAlignedStartOffset ?? loopStartOffset() + startTrim
+        } else {
+            startOffset = mediaAlignedStartOffset
+                ?? recordingStartOffset()
+                ?? 0
+        }
+        slots[slotPosition].url = outputFileURL
+        slots[slotPosition].createdAt = Date()
+        slots[slotPosition].startOffset = startOffset
+        slots[slotPosition].videoZoom = currentVideoZoom
+        slots[slotPosition].duration = max(0.25, duration)
+        slots[slotPosition].state = .recorded
+        slots[slotPosition].isPlaying = true
+        slots[slotPosition].isStopping = false
+        slots[slotPosition].stoppingStartedAt = nil
+        slots[slotPosition].isMuted = false
+        if let phase = audioLoopEngine.phase(slot: finishedSlotIndex) {
+            loopPlaybackTimes[finishedSlotIndex] = phase * slots[slotPosition].duration
+        }
+        selectedSlotIndex = nil
+        status = "Slot \(finishedSlotIndex) captured."
+        completedAudioDurations[finishedSlotIndex] = nil
+        completedVideoEndTrims[finishedSlotIndex] = nil
+        completedVideoStartTrims[finishedSlotIndex] = nil
+        if recordingSlotIndex == finishedSlotIndex {
+            self.recordingSlotIndex = nil
         }
     }
 

@@ -2,6 +2,7 @@ import Foundation
 
 struct LayoutPreset: Codable {
     var selectedVideoDeviceID: String
+    var videoInputMode: VideoInputMode?
     var selectedAudioDeviceIDs: [String]
     var selectedAudioChannelPairStart: Int?
     var selectedAudioOutputDeviceID: String?

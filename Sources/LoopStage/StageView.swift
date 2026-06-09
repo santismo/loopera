@@ -145,6 +145,7 @@ struct StageView: View {
             refreshSavedLayouts()
             offsetDraft = capture.offsetProfile
             capture.setLivePreviewZoom(livePreviewZoom)
+            capture.refreshAppWindowSources()
             metronome.bpm = capture.tempoBPM ?? 120
             capture.performanceAudioHandler = { input, sampleRate, presentationTime in
                 performance.appendLiveAudio(input: input, sampleRate: sampleRate, presentationTime: presentationTime)
@@ -203,16 +204,7 @@ struct StageView: View {
                 }
                 .help("Refresh camera and audio inputs")
 
-                Picker("Camera", selection: Binding(
-                    get: { capture.selectedDeviceID },
-                    set: { capture.selectDevice($0) }
-                )) {
-                    ForEach(capture.videoDevices, id: \.uniqueID) { device in
-                        Text(device.localizedName).tag(device.uniqueID)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 180)
+                videoSourceControls
 
                 Menu {
                     ForEach(capture.audioDevices, id: \.uniqueID) { device in
@@ -443,6 +435,60 @@ struct StageView: View {
             .foregroundStyle(.white.opacity(0.65))
         }
         .frame(width: 150)
+    }
+
+    @ViewBuilder
+    private var videoSourceControls: some View {
+        Picker("Video", selection: Binding(
+            get: { capture.videoInputMode },
+            set: { capture.selectVideoInputMode($0) }
+        )) {
+            ForEach(VideoInputMode.allCases) { mode in
+                Text(mode.rawValue).tag(mode)
+            }
+        }
+        .labelsHidden()
+        .frame(width: 104)
+
+        if capture.videoInputMode == .camera {
+            Picker("Camera", selection: Binding(
+                get: { capture.selectedDeviceID },
+                set: { capture.selectDevice($0) }
+            )) {
+                ForEach(capture.videoDevices, id: \.uniqueID) { device in
+                    Text(device.localizedName).tag(device.uniqueID)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 180)
+        } else {
+            Menu {
+                Button {
+                    capture.refreshAppWindowSources()
+                } label: {
+                    Label("Refresh Windows", systemImage: "arrow.clockwise")
+                }
+                Divider()
+                if capture.appWindowSources.isEmpty {
+                    Text("No Windows")
+                } else {
+                    ForEach(capture.appWindowSources) { source in
+                        Button {
+                            capture.selectAppWindow(source.id)
+                        } label: {
+                            if capture.selectedAppWindowID == source.id {
+                                Label(source.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(source.displayName)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label(selectedWindowTitle, systemImage: "macwindow")
+            }
+            .frame(width: 220)
+        }
     }
 
     private var layoutPresetControls: some View {
@@ -797,6 +843,7 @@ struct StageView: View {
         capture.setLivePreviewZoom(livePreviewZoom)
         let preset = LayoutPreset(
             selectedVideoDeviceID: capture.selectedDeviceID,
+            videoInputMode: capture.videoInputMode,
             selectedAudioDeviceIDs: Array(capture.selectedAudioDeviceIDs),
             selectedAudioChannelPairStart: capture.selectedAudioChannelPairStart,
             selectedAudioOutputDeviceID: output.selectedDeviceID,
@@ -830,6 +877,7 @@ struct StageView: View {
             layoutName = name
             activeLayoutName = name
             layout = preset.stageLayout
+            capture.selectVideoInputMode(preset.videoInputMode ?? .camera)
             canvasMode = preset.canvasMode ?? .landscape
             canvasScale = preset.canvasScale
             livePreviewZoom = preset.livePreviewZoom ?? 1
@@ -899,6 +947,14 @@ struct StageView: View {
 
     private var selectedVideoDeviceName: String {
         capture.videoDevices.first(where: { $0.uniqueID == capture.selectedDeviceID })?.localizedName ?? "No Camera"
+    }
+
+    private var selectedWindowTitle: String {
+        guard let id = capture.selectedAppWindowID,
+              let source = capture.appWindowSources.first(where: { $0.id == id }) else {
+            return "Select Window"
+        }
+        return source.displayName
     }
 
     private func audioPairTitle(_ start: Int) -> String {
@@ -1036,9 +1092,15 @@ struct StageView: View {
         let height = max(90, (size.height - padding * 2) * canvasScale)
 
         ZStack {
-            CameraPreview(session: capture.session, videoGravity: livePreviewVideoGravity)
-                .scaleEffect(livePreviewZoom)
-                .frame(width: width, height: height)
+            if capture.videoInputMode == .camera {
+                CameraPreview(session: capture.session, videoGravity: livePreviewVideoGravity)
+                    .scaleEffect(livePreviewZoom)
+                    .frame(width: width, height: height)
+            } else {
+                AppWindowPreview(windowID: capture.selectedAppWindowID)
+                    .scaleEffect(livePreviewZoom)
+                    .frame(width: width, height: height)
+            }
         }
         .frame(width: width, height: height)
         .clipShape(stageShape(livePreviewShape))
