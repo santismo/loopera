@@ -49,6 +49,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var pendingStopOnMasterBoundary = false
     private var pendingStopTrimEndSeconds: TimeInterval = 0
     private var pendingStartTrimSeconds: TimeInterval = 0
+    private var pendingStopTargetDuration: TimeInterval?
     private var quantizeTask: Task<Void, Never>?
     private var reconfigureTask: Task<Void, Never>?
     private var previousMasterPhase: Double?
@@ -559,6 +560,7 @@ final class CaptureController: NSObject, ObservableObject {
         thresholdPTS = nil
         pendingStopOnMasterBoundary = false
         pendingStopTrimEndSeconds = 0
+        pendingStopTargetDuration = nil
         pendingStartTrimSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .recording
@@ -604,6 +606,7 @@ final class CaptureController: NSObject, ObservableObject {
         thresholdPTS = nil
         pendingStopOnMasterBoundary = false
         pendingStopTrimEndSeconds = 0
+        pendingStopTargetDuration = nil
         pendingStartTrimSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .armed
@@ -627,6 +630,7 @@ final class CaptureController: NSObject, ObservableObject {
         thresholdPTS = nil
         pendingStopOnMasterBoundary = false
         pendingStopTrimEndSeconds = 0
+        pendingStopTargetDuration = nil
         pendingStartTrimSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .listening
@@ -641,6 +645,7 @@ final class CaptureController: NSObject, ObservableObject {
         guard isRecording else { return }
         if recordingSlotIndex == 1,
            let metronomeGridBPM,
+           metronomeGridStartDate != nil,
            let currentDuration = audioLoopEngine.currentRecordingDuration(slot: 1),
            let targetDuration = targetMetronomeStopDuration(max(0, currentDuration - pendingStartTrimSeconds), bpm: metronomeGridBPM) {
             let delay = targetDuration - max(0, currentDuration - pendingStartTrimSeconds)
@@ -669,7 +674,7 @@ final class CaptureController: NSObject, ObservableObject {
         let currentRecordingDuration = recordingSlotIndex.flatMap {
             audioLoopEngine.currentRecordingDuration(slot: $0)
         } ?? 0
-        if let metronomeGridBPM {
+        if let metronomeGridBPM, metronomeGridStartDate != nil {
             let beat = 60.0 / metronomeGridBPM
             let previousBoundaryGrace = beat * 1.5
             if currentRecordingDuration >= masterDuration,
@@ -677,11 +682,10 @@ final class CaptureController: NSObject, ObservableObject {
                sincePreviousBoundary <= previousBoundaryGrace {
                 pendingStopTrimEndSeconds = sincePreviousBoundary
                 pendingStopOnMasterBoundary = false
+                pendingStopTargetDuration = nil
                 stopRecordingNow()
             } else {
-                pendingStopTrimEndSeconds = 0
-                pendingStopOnMasterBoundary = true
-                status = "Slot \(recordingSlotIndex ?? 0) will close on master boundary."
+                scheduleStopAtMasterLength(currentDuration: currentRecordingDuration, masterDuration: masterDuration)
             }
             return
         }
@@ -691,11 +695,44 @@ final class CaptureController: NSObject, ObservableObject {
            sincePreviousBoundary > 0 {
             pendingStopTrimEndSeconds = sincePreviousBoundary
             pendingStopOnMasterBoundary = false
+            pendingStopTargetDuration = nil
             stopRecordingNow()
         } else {
-            pendingStopTrimEndSeconds = 0
-            pendingStopOnMasterBoundary = true
-            status = "Slot \(recordingSlotIndex ?? 0) will close on master boundary."
+            scheduleStopAtMasterLength(currentDuration: currentRecordingDuration, masterDuration: masterDuration)
+        }
+    }
+
+    private func scheduleStopAtMasterLength(currentDuration: TimeInterval, masterDuration: TimeInterval) {
+        guard let recordingSlotIndex, masterDuration.isFinite, masterDuration > 0 else { return }
+        let multiple = max(1, Int(ceil(max(0, currentDuration) / masterDuration)))
+        let targetDuration = Double(multiple) * masterDuration
+        pendingStopTrimEndSeconds = 0
+        pendingStopOnMasterBoundary = false
+        pendingStopTargetDuration = targetDuration
+        stopTask?.cancel()
+        status = "Slot \(recordingSlotIndex) will close on master boundary."
+        stopTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let remaining = await MainActor.run { () -> TimeInterval? in
+                    guard let self,
+                          self.isRecording,
+                          self.recordingSlotIndex == recordingSlotIndex,
+                          let duration = self.audioLoopEngine.currentRecordingDuration(slot: recordingSlotIndex)
+                    else { return nil }
+                    return targetDuration - duration
+                }
+                guard let remaining else { return }
+                if remaining <= 0.004 { break }
+                try? await Task.sleep(for: .seconds(min(remaining, 0.02)))
+            }
+
+            await MainActor.run {
+                guard let self, self.isRecording, self.recordingSlotIndex == recordingSlotIndex else { return }
+                let current = self.audioLoopEngine.currentRecordingDuration(slot: recordingSlotIndex) ?? targetDuration
+                self.pendingStopTrimEndSeconds = max(0, current - targetDuration)
+                self.pendingStopTargetDuration = nil
+                self.stopRecordingNow()
+            }
         }
     }
 
@@ -709,6 +746,7 @@ final class CaptureController: NSObject, ObservableObject {
             if recordingSlotIndex == 1 {
                 trimEndSeconds = max(0, trimEndSeconds + offsetProfile.audioStopOffsetMilliseconds / 1000)
                 if let metronomeGridBPM,
+                   metronomeGridStartDate != nil,
                    let currentDuration = audioLoopEngine.currentRecordingDuration(slot: recordingSlotIndex) {
                     let effectiveDuration = max(0, currentDuration - trimStartSeconds)
                     let quantized = quantizedMetronomeDuration(effectiveDuration, bpm: metronomeGridBPM)
@@ -736,6 +774,7 @@ final class CaptureController: NSObject, ObservableObject {
         }
         pendingStopOnMasterBoundary = false
         pendingStopTrimEndSeconds = 0
+        pendingStopTargetDuration = nil
         pendingStartTrimSeconds = 0
         movieOutput.stopRecording()
         status = "Finishing loop..."
@@ -890,6 +929,7 @@ final class CaptureController: NSObject, ObservableObject {
 
         if isRecording, pendingStopOnMasterBoundary, crossedBoundary {
             pendingStopTrimEndSeconds = max(0, master.duration * masterPhase)
+            pendingStopTargetDuration = nil
             stopRecordingNow()
             return
         }

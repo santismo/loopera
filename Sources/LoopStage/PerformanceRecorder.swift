@@ -18,8 +18,12 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private var isFinishing = false
     private var fallbackTimer: DispatchSourceTimer?
     private var fallbackStartTime: Date?
+    private var nextVideoFrameIndex: Int64 = 0
     private nonisolated(unsafe) var acceptingAudio = false
+    private let captureQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.capture", qos: .userInteractive)
     private let sampleQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.samples")
+    private static let targetFrameRate: Int32 = 60
+    private static let maxCatchUpFrames: Int64 = 8
 
     @MainActor
     func start(microphoneDeviceID: String?, fallbackView: NSView?) {
@@ -50,11 +54,11 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
     @MainActor
     private func startFallbackViewCapture(view: NSView?) throws {
-        guard let view else { throw RecorderError.noStageView }
+        guard let view, let captureSource = WindowCaptureSource(view: view) else { throw RecorderError.noStageView }
         let stageAspect = max(1, view.bounds.width) / max(1, view.bounds.height)
         let scale = view.window?.backingScaleFactor ?? view.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
         let sourceSize = CGSize(width: view.bounds.width * scale, height: view.bounds.height * scale)
-        let size = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, longEdgeLimit: 2560)
+        let size = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, minimumLongEdge: 2560, longEdgeLimit: 3840)
         var width = Int(size.width)
         var height = Int(size.height)
         let outputURL = Self.recordingsDirectory
@@ -62,13 +66,18 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             .appendingPathExtension("mov")
 
         do {
-            try prepareWriter(outputURL: outputURL, width: width, height: height)
+            try prepareWriter(outputURL: outputURL, width: width, height: height, codec: .hevc)
         } catch {
             cleanupWriter()
-            let fallbackSize = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, longEdgeLimit: 1920)
-            width = Int(fallbackSize.width)
-            height = Int(fallbackSize.height)
-            try prepareWriter(outputURL: outputURL, width: width, height: height)
+            do {
+                try prepareWriter(outputURL: outputURL, width: width, height: height, codec: .h264)
+            } catch {
+                cleanupWriter()
+                let fallbackSize = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, minimumLongEdge: 1920, longEdgeLimit: 1920)
+                width = Int(fallbackSize.width)
+                height = Int(fallbackSize.height)
+                try prepareWriter(outputURL: outputURL, width: width, height: height, codec: .h264)
+            }
         }
         lastRecordingURL = outputURL
         let startTime = Date()
@@ -76,16 +85,16 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         let captureWidth = width
         let captureHeight = height
 
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: 1.0 / 60.0)
-        timer.setEventHandler { [weak self, weak view] in
-            guard let self, let view else { return }
-            guard let image = self.snapshot(view: view, width: captureWidth, height: captureHeight) else { return }
+        let timer = DispatchSource.makeTimerSource(queue: captureQueue)
+        timer.schedule(deadline: .now(), repeating: 1.0 / Double(Self.targetFrameRate), leeway: .milliseconds(2))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            guard let image = Self.snapshot(source: captureSource) else { return }
             let elapsed = Date().timeIntervalSince(startTime)
             self.sampleQueue.async {
                 self.appendFallbackFrame(
                     image,
-                    time: CMTime(seconds: elapsed, preferredTimescale: 600),
+                    elapsed: elapsed,
                     width: captureWidth,
                     height: captureHeight
                 )
@@ -95,9 +104,10 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         timer.resume()
     }
 
-    private func prepareWriter(outputURL: URL, width: Int, height: Int) throws {
+    private func prepareWriter(outputURL: URL, width: Int, height: Int, codec: AVVideoCodecType) throws {
         didStartSession = false
         isFinishing = false
+        nextVideoFrameIndex = 0
         try? FileManager.default.removeItem(at: outputURL)
         try FileManager.default.createDirectory(
             at: outputURL.deletingLastPathComponent(),
@@ -105,19 +115,22 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         )
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
-        let targetBitrate = max(80_000_000, width * height * 32)
+        let targetBitrate = max(120_000_000, width * height * 42)
+        var compressionProperties: [String: Any] = [
+            AVVideoAverageBitRateKey: targetBitrate,
+            AVVideoExpectedSourceFrameRateKey: Int(Self.targetFrameRate),
+            AVVideoMaxKeyFrameIntervalKey: Int(Self.targetFrameRate),
+            AVVideoMaxKeyFrameIntervalDurationKey: 1,
+            AVVideoAllowFrameReorderingKey: false
+        ]
+        if codec == .h264 {
+            compressionProperties[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
+        }
         let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoCodecKey: codec,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: targetBitrate,
-                AVVideoExpectedSourceFrameRateKey: 60,
-                AVVideoMaxKeyFrameIntervalKey: 60,
-                AVVideoMaxKeyFrameIntervalDurationKey: 1,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                AVVideoAllowFrameReorderingKey: false
-            ]
+            AVVideoCompressionPropertiesKey: compressionProperties
         ]
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
@@ -170,10 +183,15 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         self.pixelBufferAdaptor = adaptor
     }
 
-    private static func recordingSize(aspect: CGFloat, sourceSize: CGSize, longEdgeLimit: Double) -> CGSize {
+    private static func recordingSize(
+        aspect: CGFloat,
+        sourceSize: CGSize,
+        minimumLongEdge: Double,
+        longEdgeLimit: Double
+    ) -> CGSize {
         let sourceAspect = Double(max(0.1, aspect))
         let sourceLongEdge = max(Double(sourceSize.width), Double(sourceSize.height))
-        let longEdge = min(longEdgeLimit, max(1920, sourceLongEdge))
+        let longEdge = min(longEdgeLimit, max(minimumLongEdge, sourceLongEdge))
         let shortEdge: Double
         let width: Double
         let height: Double
@@ -210,6 +228,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             self.loopAudioStartPTS = nil
             self.isFinishing = false
             self.fallbackStartTime = nil
+            self.nextVideoFrameIndex = 0
             self.acceptingAudio = false
         }
     }
@@ -231,6 +250,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
                 self.liveAudioStartPTS = nil
                 self.loopAudioStartPTS = nil
                 self.isFinishing = false
+                self.nextVideoFrameIndex = 0
                 self.acceptingAudio = false
 
                 guard let writer else {
@@ -279,57 +299,50 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 }
 
 extension PerformanceRecorder {
-    @MainActor
-    private func snapshot(view: NSView, width: Int, height: Int) -> CGImage? {
-        if let window = view.window,
-           let windowImage = CGWindowListCreateImage(
-            .null,
-            .optionIncludingWindow,
-            CGWindowID(window.windowNumber),
-            [.boundsIgnoreFraming, .bestResolution]
-           ) {
-            let rectInWindow = view.convert(view.bounds, to: nil)
-            let scale = CGFloat(windowImage.width) / max(1, window.frame.width)
-            let cropBounds = CGRect(x: 0, y: 0, width: windowImage.width, height: windowImage.height)
-            let cropRect = CGRect(
-                x: rectInWindow.minX * scale,
-                y: CGFloat(windowImage.height) - rectInWindow.maxY * scale,
-                width: rectInWindow.width * scale,
-                height: rectInWindow.height * scale
-            ).integral.intersection(cropBounds)
+    private struct WindowCaptureSource: @unchecked Sendable {
+        let windowID: CGWindowID
+        let windowFrameSize: CGSize
+        let cropRectInWindow: CGRect
 
-            if cropRect.width > 0,
-               cropRect.height > 0,
-               let cropped = windowImage.cropping(to: cropRect) {
-                return cropped
-            }
-            return windowImage
+        @MainActor
+        init?(view: NSView) {
+            guard let window = view.window else { return nil }
+            windowID = CGWindowID(window.windowNumber)
+            windowFrameSize = window.frame.size
+            cropRectInWindow = view.convert(view.bounds, to: nil)
         }
-
-        let bitmap = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: width,
-            pixelsHigh: height,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        )
-        guard let bitmap else { return nil }
-        bitmap.size = view.bounds.size
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-        return bitmap.cgImage
     }
 
-    private func appendFallbackFrame(_ image: CGImage, time: CMTime, width: Int, height: Int) {
+    private static func snapshot(source: WindowCaptureSource) -> CGImage? {
+        guard let windowImage = CGWindowListCreateImage(
+            .null,
+            .optionIncludingWindow,
+            source.windowID,
+            [.boundsIgnoreFraming, .bestResolution]
+        ) else { return nil }
+
+        let scale = CGFloat(windowImage.width) / max(1, source.windowFrameSize.width)
+        let cropBounds = CGRect(x: 0, y: 0, width: windowImage.width, height: windowImage.height)
+        let cropRect = CGRect(
+            x: source.cropRectInWindow.minX * scale,
+            y: CGFloat(windowImage.height) - source.cropRectInWindow.maxY * scale,
+            width: source.cropRectInWindow.width * scale,
+            height: source.cropRectInWindow.height * scale
+        ).integral.intersection(cropBounds)
+
+        if cropRect.width > 0,
+           cropRect.height > 0,
+           let cropped = windowImage.cropping(to: cropRect) {
+            return cropped
+        }
+        return windowImage
+    }
+
+    private func appendFallbackFrame(_ image: CGImage, elapsed: TimeInterval, width: Int, height: Int) {
         guard
             let writer,
             let videoInput,
             let pixelBufferAdaptor,
-            videoInput.isReadyForMoreMediaData,
             let pool = pixelBufferAdaptor.pixelBufferPool
         else { return }
 
@@ -338,6 +351,33 @@ extension PerformanceRecorder {
             didStartSession = true
         }
 
+        let targetFrameIndex = max(0, Int64((elapsed * Double(Self.targetFrameRate)).rounded(.down)))
+        if nextVideoFrameIndex < targetFrameIndex - Self.maxCatchUpFrames + 1 {
+            nextVideoFrameIndex = targetFrameIndex - Self.maxCatchUpFrames + 1
+        }
+
+        while nextVideoFrameIndex <= targetFrameIndex {
+            guard videoInput.isReadyForMoreMediaData else { return }
+            appendPixelBuffer(
+                image,
+                time: CMTime(value: nextVideoFrameIndex, timescale: Self.targetFrameRate),
+                adaptor: pixelBufferAdaptor,
+                pool: pool,
+                width: width,
+                height: height
+            )
+            nextVideoFrameIndex += 1
+        }
+    }
+
+    private func appendPixelBuffer(
+        _ image: CGImage,
+        time: CMTime,
+        adaptor: AVAssetWriterInputPixelBufferAdaptor,
+        pool: CVPixelBufferPool,
+        width: Int,
+        height: Int
+    ) {
         var buffer: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) == kCVReturnSuccess, let buffer else { return }
         CVPixelBufferLockBaseAddress(buffer, [])
@@ -356,7 +396,7 @@ extension PerformanceRecorder {
             context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         }
         CVPixelBufferUnlockBaseAddress(buffer, [])
-        pixelBufferAdaptor.append(buffer, withPresentationTime: time)
+        adaptor.append(buffer, withPresentationTime: time)
     }
 
     func appendLiveAudio(input: AudioLoopEngine.InputBuffer, sampleRate: Double, presentationTime: CMTime) {
