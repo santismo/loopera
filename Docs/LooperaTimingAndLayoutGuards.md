@@ -22,6 +22,23 @@ video finalization, edit mode, or layout preset code.
   not enough to quantize only the UI duration after recording.
 - `beginRecordingSyncedToMaster` and `masterBoundaryOffsetSeconds` are part of
   the sample-grid sync path. Do not replace them with date or UI phase math.
+- Do not poll the slave recording duration to decide when an early spacebar
+  stop is done. Early slave stops must set a pending target duration and close
+  from the master boundary crossing in `tick()`.
+- New slave playback should be armed by `AudioLoopEngine.finishRecording` while
+  the engine lock is held. A separate restart call after finalizing can create
+  a render-cycle gap or read a later master phase.
+
+## Loop Video Sync
+
+- Loop videos are visual followers of the audio loop. The preferred video start
+  offset is `recorded video duration - finalized audio loop duration - end trim`.
+- Wall-clock offsets such as `pendingStartDate - captureStartDate` are fallback
+  only. They can be wrong by seconds when a slave is armed before the next master
+  boundary or another recording changes controller state before video finalizes.
+- Captured loop video zoom should match the saved live preview zoom. Do not
+  attenuate the loop zoom relative to the live preview unless the UI exposes that
+  as a separate user setting.
 
 ## Layout/Edit Controls
 
@@ -32,3 +49,6 @@ video finalization, edit mode, or layout preset code.
   toolbar identity.
 - Layout preset updates must resolve old saved filenames as well as display
   names. Old presets may have hyphenated filenames that display with spaces.
+- Save and Update must write the current edit values directly. Do not close edit
+  mode as part of the same button action before writing the preset, because that
+  rebuilds toolbar/edit state while the click is still being handled.

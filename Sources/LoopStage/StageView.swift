@@ -409,6 +409,7 @@ struct StageView: View {
             HStack(spacing: 10) {
                 masterProgressBar
                 slotStatusStrip
+                masterVolumeControl
             }
 
         }
@@ -447,9 +448,6 @@ struct StageView: View {
     private var layoutPresetControls: some View {
         HStack(spacing: 6) {
             Button {
-                if editMode {
-                    closeEditMode()
-                }
                 layoutName = normalizedLayoutName(layoutName)
                 showSaveLayout = true
             } label: {
@@ -458,9 +456,6 @@ struct StageView: View {
             .help("Save layout as")
 
             Button {
-                if editMode {
-                    closeEditMode()
-                }
                 updateCurrentLayout()
             } label: {
                 Label("Update", systemImage: "checkmark")
@@ -799,6 +794,7 @@ struct StageView: View {
 
     private func saveLayout(named name: String) {
         let name = normalizedLayoutName(name)
+        capture.setLivePreviewZoom(livePreviewZoom)
         let preset = LayoutPreset(
             selectedVideoDeviceID: capture.selectedDeviceID,
             selectedAudioDeviceIDs: Array(capture.selectedAudioDeviceIDs),
@@ -979,6 +975,22 @@ struct StageView: View {
         }
         .frame(height: 22)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var masterVolumeControl: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "speaker.wave.2")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+            Slider(value: $capture.masterVolume, in: 0...1.25)
+                .frame(width: 92)
+            Text("\(Int((max(0, min(1.25, capture.masterVolume)) * 100).rounded()))%")
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.62))
+                .frame(width: 34, alignment: .trailing)
+        }
+        .frame(width: 146)
+        .help("App master volume")
     }
 
     private func masterProgressPhase(syncTime: TimeInterval, updatedAt: Date, duration: TimeInterval) -> Double {
@@ -1373,8 +1385,7 @@ private struct LoopTile: View {
     }
 
     private var effectiveLoopVideoZoom: Double {
-        let zoom = max(1, slot.videoZoom)
-        return 1 + (zoom - 1) * 0.5
+        max(1, slot.videoZoom)
     }
 
     private var ringColor: Color? {

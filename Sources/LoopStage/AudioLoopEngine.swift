@@ -7,6 +7,12 @@ final class AudioLoopEngine: @unchecked Sendable {
         case thresholdCrossed
     }
 
+    enum RecordingPlaybackStart {
+        case stopped
+        case restart(offsetSeconds: TimeInterval)
+        case syncedToMaster
+    }
+
     struct InputAnalysis {
         var rms: Double
         var peak: Double
@@ -66,6 +72,7 @@ final class AudioLoopEngine: @unchecked Sendable {
     private var crossfadeMilliseconds: Double = 45
     private var fadeOutMilliseconds: Double = 180
     private var fadeMode: LoopFadeMode = .toLoopEnd
+    private var masterVolume: Float = 1
 
     init() {
         configureEngine()
@@ -96,6 +103,12 @@ final class AudioLoopEngine: @unchecked Sendable {
         crossfadeMilliseconds = max(0, profile.crossfadeMilliseconds)
         fadeOutMilliseconds = max(1, profile.loopFadeOutMilliseconds)
         fadeMode = profile.loopFadeMode
+        lock.unlock()
+    }
+
+    func setMasterVolume(_ volume: Double) {
+        lock.lock()
+        masterVolume = Float(max(0, min(1.5, volume)))
         lock.unlock()
     }
 
@@ -141,7 +154,8 @@ final class AudioLoopEngine: @unchecked Sendable {
         slot: Int,
         trimStartSeconds: TimeInterval = 0,
         trimEndSeconds: TimeInterval = 0,
-        targetDurationSeconds: TimeInterval? = nil
+        targetDurationSeconds: TimeInterval? = nil,
+        playbackStart: RecordingPlaybackStart = .stopped
     ) -> TimeInterval? {
         lock.lock()
         defer { lock.unlock() }
@@ -199,7 +213,7 @@ final class AudioLoopEngine: @unchecked Sendable {
             padLoopBuffers(left: &left, right: &right, targetCount: targetCount)
             count = targetCount
         }
-        loops[slot] = Loop(
+        var loop = Loop(
             left: left,
             right: right,
             playPosition: 0,
@@ -207,6 +221,8 @@ final class AudioLoopEngine: @unchecked Sendable {
             isPlaying: false,
             isMuted: false
         )
+        applyPlaybackStartLocked(&loop, mode: playbackStart)
+        loops[slot] = loop
         let duration = Double(count) / sampleRate
         recordingSlot = nil
         listeningSlot = nil
@@ -453,6 +469,7 @@ final class AudioLoopEngine: @unchecked Sendable {
             data.initialize(repeating: 0, count: frameCount)
         }
 
+        let outputGain: Float
         lock.lock()
         for slotIndex in loops.keys.sorted() {
             guard var loop = loops[slotIndex], loop.isPlaying, !loop.left.isEmpty else { continue }
@@ -493,12 +510,13 @@ final class AudioLoopEngine: @unchecked Sendable {
             }
             loops[slotIndex] = loop
         }
+        outputGain = masterVolume
         lock.unlock()
 
         for buffer in abl {
             guard let data = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
             for frame in 0..<frameCount {
-                data[frame] = max(-0.98, min(0.98, data[frame]))
+                data[frame] = max(-0.98, min(0.98, data[frame] * outputGain))
             }
         }
 
@@ -575,6 +593,34 @@ final class AudioLoopEngine: @unchecked Sendable {
         while left.count < targetCount {
             left.append(left[capturedCount - 1])
             right.append(right[capturedCount - 1])
+        }
+    }
+
+    private func applyPlaybackStartLocked(_ loop: inout Loop, mode: RecordingPlaybackStart) {
+        let length = min(loop.left.count, loop.right.count)
+        guard length > 0 else { return }
+
+        switch mode {
+        case .stopped:
+            return
+        case .restart(let offsetSeconds):
+            let offsetSamples = max(0, Int(sampleRate * offsetSeconds)) % length
+            loop.playPosition = offsetSamples
+            loop.hasWrapped = offsetSamples > 0
+            loop.isPlaying = true
+        case .syncedToMaster:
+            if let master = loops[1] {
+                let masterLength = min(master.left.count, master.right.count)
+                if masterLength > 0 {
+                    loop.playPosition = master.playPosition % length
+                    loop.hasWrapped = loop.playPosition > 0
+                    loop.isPlaying = true
+                    return
+                }
+            }
+            loop.playPosition = 0
+            loop.hasWrapped = false
+            loop.isPlaying = true
         }
     }
 

@@ -27,6 +27,13 @@ final class CaptureController: NSObject, ObservableObject {
     @Published var crossfadeMilliseconds: Double = 35
     @Published var metronomeGridBPM: Double?
     @Published var offsetProfile = OffsetProfile()
+    @Published var masterVolume: Double = 1 {
+        didSet {
+            let clamped = max(0, min(1.5, masterVolume))
+            UserDefaults.standard.set(clamped, forKey: masterVolumeKey)
+            audioLoopEngine.setMasterVolume(clamped)
+        }
+    }
     @Published private(set) var loopPlaybackTimes: [Int: TimeInterval] = [:]
     @Published private(set) var loopPlaybackTimeUpdatedAt = Date()
     @Published private(set) var waveformSnapshots: [AudioLoopEngine.WaveformSnapshot] = []
@@ -67,6 +74,7 @@ final class CaptureController: NSObject, ObservableObject {
     private nonisolated(unsafe) var lastMeterPublishDateForCapture = Date.distantPast
     private let lastAudioDeviceIDKey = "Loopera.lastAudioDeviceID"
     private let lastAudioChannelPairStartKey = "Loopera.lastAudioChannelPairStart"
+    private let masterVolumeKey = "Loopera.masterVolume"
 
     private struct CapturedStereoInput {
         var buffer: AudioLoopEngine.InputBuffer
@@ -96,6 +104,11 @@ final class CaptureController: NSObject, ObservableObject {
         audioMeterOutput.setSampleBufferDelegate(self, queue: audioMeterQueue)
         offsetProfile = OffsetProfileStore.load(audioDeviceID: selectedAudioDeviceIDs.first, videoDeviceID: selectedDeviceID)
         audioLoopEngine.apply(profile: offsetProfile)
+        let savedVolume = UserDefaults.standard.object(forKey: masterVolumeKey) == nil
+            ? 1
+            : UserDefaults.standard.double(forKey: masterVolumeKey)
+        masterVolume = max(0, min(1.5, savedVolume))
+        audioLoopEngine.setMasterVolume(masterVolume)
         audioLoopEngine.start()
     }
 
@@ -771,33 +784,10 @@ final class CaptureController: NSObject, ObservableObject {
         let multiple = max(1, Int(ceil(max(0, currentDuration) / masterDuration)))
         let targetDuration = Double(multiple) * masterDuration
         pendingStopTrimEndSeconds = 0
-        pendingStopOnMasterBoundary = false
+        pendingStopOnMasterBoundary = true
         pendingStopTargetDuration = targetDuration
         stopTask?.cancel()
         status = "Slot \(recordingSlotIndex) will close on master boundary."
-        stopTask = Task { [weak self] in
-            while !Task.isCancelled {
-                let remaining = await MainActor.run { () -> TimeInterval? in
-                    guard let self,
-                          self.isRecording,
-                          self.recordingSlotIndex == recordingSlotIndex,
-                          let duration = self.audioLoopEngine.currentRecordingDuration(slot: recordingSlotIndex)
-                    else { return nil }
-                    return targetDuration - duration
-                }
-                guard let remaining else { return }
-                if remaining <= 0 { break }
-                try? await Task.sleep(for: .seconds(max(0.001, min(remaining, 0.01))))
-            }
-
-            await MainActor.run {
-                guard let self, self.isRecording, self.recordingSlotIndex == recordingSlotIndex else { return }
-                let current = self.audioLoopEngine.currentRecordingDuration(slot: recordingSlotIndex) ?? targetDuration
-                self.pendingStopTrimEndSeconds = max(0, current - targetDuration)
-                self.pendingStopTargetDuration = nil
-                self.stopRecordingNow()
-            }
-        }
     }
 
     private func stopRecordingNow() {
@@ -825,18 +815,16 @@ final class CaptureController: NSObject, ObservableObject {
                 slot: recordingSlotIndex,
                 trimStartSeconds: trimStartSeconds,
                 trimEndSeconds: trimEndSeconds,
-                targetDurationSeconds: targetDuration
+                targetDurationSeconds: targetDuration,
+                playbackStart: recordingSlotIndex == 1
+                    ? .restart(offsetSeconds: trimEndSeconds)
+                    : .syncedToMaster
             )
             completedAudioDurations[recordingSlotIndex] = duration
             completedVideoEndTrims[recordingSlotIndex] = trimEndSeconds
             completedVideoStartTrims[recordingSlotIndex] = trimStartSeconds
             if duration != nil {
                 audioLoopCompleted = true
-                if recordingSlotIndex == 1 {
-                    audioLoopEngine.restart(slot: recordingSlotIndex, offsetSeconds: trimEndSeconds)
-                } else {
-                    audioLoopEngine.restartSyncedToMaster(slot: recordingSlotIndex)
-                }
                 markAudioLoopReady(slot: recordingSlotIndex, duration: duration)
                 Task.detached(priority: .utility) { [audioLoopEngine] in
                     audioLoopEngine.refreshRecordedWaveform(slot: recordingSlotIndex)
@@ -848,10 +836,7 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStopTargetDuration = nil
         pendingStartTrimSeconds = 0
         if shouldStopMovie {
-            Task { @MainActor [weak self] in
-                guard let self, self.movieOutput.isRecording else { return }
-                self.movieOutput.stopRecording()
-            }
+            movieOutput.stopRecording()
         }
         status = audioLoopCompleted ? "Audio loop playing. Finishing video..." : "Finishing loop..."
     }
@@ -1025,7 +1010,6 @@ final class CaptureController: NSObject, ObservableObject {
 
         if isRecording, pendingStopOnMasterBoundary, crossedBoundary {
             pendingStopTrimEndSeconds = max(0, audioLoopEngine.masterBoundaryOffsetSeconds() ?? master.duration * masterPhase)
-            pendingStopTargetDuration = nil
             stopRecordingNow()
             return
         }
@@ -1156,12 +1140,17 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
             let duration = quantizedLoopDuration(rawDuration, slot: finishedSlotIndex)
             let endTrim = completedVideoEndTrims[finishedSlotIndex] ?? 0
             let startTrim = completedVideoStartTrims[finishedSlotIndex] ?? 0
+            let mediaAlignedStartOffset = videoStartOffset(
+                assetDuration: assetDuration,
+                loopDuration: duration,
+                endTrim: endTrim
+            )
             let startOffset: TimeInterval
             if finishedSlotIndex == 1 {
-                startOffset = loopStartOffset() + startTrim
+                startOffset = mediaAlignedStartOffset ?? loopStartOffset() + startTrim
             } else {
-                startOffset = recordingStartOffset()
-                    ?? videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
+                startOffset = mediaAlignedStartOffset
+                    ?? recordingStartOffset()
                     ?? 0
             }
             slots[slotPosition].url = outputFileURL
