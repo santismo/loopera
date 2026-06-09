@@ -493,8 +493,12 @@ struct StageView: View {
     }
 
     private func closeEditMode() {
+        focusedField = nil
         editMode = false
         capture.status = "Edit mode off."
+        DispatchQueue.main.async {
+            NSApp.keyWindow?.makeFirstResponder(nil)
+        }
     }
 
     private func toggleEditMode() {
@@ -1737,7 +1741,7 @@ private struct KeyEventMonitor: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         context.coordinator.start(handler: handler)
-        return NSView()
+        return PassthroughNSView()
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
@@ -1767,6 +1771,12 @@ private struct KeyEventMonitor: NSViewRepresentable {
             if let monitor {
                 NSEvent.removeMonitor(monitor)
             }
+        }
+    }
+
+    final class PassthroughNSView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
         }
     }
 }
