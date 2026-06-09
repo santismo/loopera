@@ -23,7 +23,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private let captureQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.capture", qos: .userInteractive)
     private let sampleQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.samples")
     private static let targetFrameRate: Int32 = 60
-    private static let maxCatchUpFrames: Int64 = 1
+    private static let maxCatchUpFrames: Int64 = 8
 
     @MainActor
     func start(microphoneDeviceID: String?, fallbackView: NSView?) {
@@ -58,7 +58,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
         let stageAspect = max(1, view.bounds.width) / max(1, view.bounds.height)
         let scale = view.window?.backingScaleFactor ?? view.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
         let sourceSize = CGSize(width: view.bounds.width * scale, height: view.bounds.height * scale)
-        let size = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, minimumLongEdge: 2560, longEdgeLimit: 2560)
+        let size = Self.recordingSize(aspect: stageAspect, sourceSize: sourceSize, minimumLongEdge: 2560, longEdgeLimit: 3840)
         var width = Int(size.width)
         var height = Int(size.height)
         let outputURL = Self.recordingsDirectory

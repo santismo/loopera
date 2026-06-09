@@ -701,8 +701,8 @@ final class CaptureController: NSObject, ObservableObject {
         stopTask?.cancel()
         let masterPhase = audioLoopEngine.phase(slot: 1) ?? 0
         let masterDuration = masterDuration ?? 0
-        let sincePreviousBoundary = masterPhase * masterDuration
-        let untilNextBoundary = (1 - masterPhase) * masterDuration
+        let sincePreviousBoundary = audioLoopEngine.masterBoundaryOffsetSeconds() ?? masterPhase * masterDuration
+        let untilNextBoundary = max(0, masterDuration - sincePreviousBoundary)
         let currentRecordingDuration = recordingSlotIndex.flatMap {
             audioLoopEngine.currentRecordingDuration(slot: $0)
         } ?? 0
@@ -755,8 +755,8 @@ final class CaptureController: NSObject, ObservableObject {
                     return targetDuration - duration
                 }
                 guard let remaining else { return }
-                if remaining <= 0.004 { break }
-                try? await Task.sleep(for: .seconds(min(remaining, 0.02)))
+                if remaining <= 0 { break }
+                try? await Task.sleep(for: .seconds(max(0.001, min(remaining, 0.01))))
             }
 
             await MainActor.run {
@@ -966,7 +966,7 @@ final class CaptureController: NSObject, ObservableObject {
         let crossedBoundary = didMasterCrossBoundary(currentPhase: masterPhase)
 
         if isRecording, pendingStopOnMasterBoundary, crossedBoundary {
-            pendingStopTrimEndSeconds = max(0, master.duration * masterPhase)
+            pendingStopTrimEndSeconds = max(0, audioLoopEngine.masterBoundaryOffsetSeconds() ?? master.duration * masterPhase)
             pendingStopTargetDuration = nil
             stopRecordingNow()
             return
@@ -977,10 +977,10 @@ final class CaptureController: NSObject, ObservableObject {
            let slotPosition = slots.firstIndex(where: { $0.index == recordingSlotIndex }),
            slots[slotPosition].state == .armed,
            crossedBoundary {
-            let preRoll = max(0, master.duration * masterPhase)
+            let preRoll = max(0, audioLoopEngine.masterBoundaryOffsetSeconds() ?? master.duration * masterPhase)
             pendingStartDate = Date().addingTimeInterval(-preRoll)
             slots[slotPosition].state = .recording
-            audioLoopEngine.beginRecording(slot: recordingSlotIndex, preRollSeconds: preRoll)
+            audioLoopEngine.beginRecordingSyncedToMaster(slot: recordingSlotIndex)
             status = "Recording slot \(recordingSlotIndex)..."
             return
         }

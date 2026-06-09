@@ -20,6 +20,7 @@ struct StageView: View {
     @State private var livePreviewShape: LoopSlotShape = .roundedSquare
     @State private var dragPositions: [UUID: CGPointUnit] = [:]
     @State private var layoutName = "Default"
+    @State private var activeLayoutName: String?
     @State private var savedLayoutNames: [String] = []
     @State private var stageCaptureView: NSView?
     @State private var showOffsetSettings = false
@@ -152,7 +153,7 @@ struct StageView: View {
             SaveLayoutView(
                 layoutName: $layoutName,
                 onSave: {
-                    saveLayout()
+                    saveLayoutAs()
                     showSaveLayout = false
                 }
             )
@@ -452,7 +453,7 @@ struct StageView: View {
             .help("Save layout as")
 
             Button {
-                saveLayout()
+                updateCurrentLayout()
             } label: {
                 Label("Update", systemImage: "checkmark")
             }
@@ -765,8 +766,23 @@ struct StageView: View {
         return slot.triggerKey
     }
 
-    private func saveLayout() {
+    private func updateCurrentLayout() {
+        if let activeLayoutName,
+           LayoutPresetStore.exists(name: activeLayoutName) {
+            saveLayout(named: activeLayoutName)
+        } else {
+            layoutName = normalizedLayoutName(layoutName)
+            showSaveLayout = true
+        }
+    }
+
+    private func saveLayoutAs() {
         let name = normalizedLayoutName(layoutName)
+        saveLayout(named: name)
+    }
+
+    private func saveLayout(named name: String) {
+        let name = normalizedLayoutName(name)
         let preset = LayoutPreset(
             selectedVideoDeviceID: capture.selectedDeviceID,
             selectedAudioDeviceIDs: Array(capture.selectedAudioDeviceIDs),
@@ -787,6 +803,7 @@ struct StageView: View {
             let data = try JSONEncoder().encode(preset)
             try data.write(to: LayoutPresetStore.url(for: name), options: .atomic)
             layoutName = name
+            activeLayoutName = name
             refreshSavedLayouts()
             capture.status = "Saved layout: \(name)."
         } catch {
@@ -799,6 +816,7 @@ struct StageView: View {
             let data = try Data(contentsOf: LayoutPresetStore.url(for: name))
             let preset = try JSONDecoder().decode(LayoutPreset.self, from: data)
             layoutName = name
+            activeLayoutName = name
             layout = preset.stageLayout
             canvasMode = preset.canvasMode ?? .landscape
             canvasScale = preset.canvasScale

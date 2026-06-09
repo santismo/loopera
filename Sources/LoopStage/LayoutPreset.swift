@@ -66,6 +66,10 @@ enum LayoutPresetStore {
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
+    static func exists(name: String) -> Bool {
+        FileManager.default.fileExists(atPath: url(for: name).path)
+    }
+
     private static func fileName(for name: String) -> String {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let source = trimmed.isEmpty ? "Default" : trimmed
