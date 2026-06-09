@@ -25,9 +25,7 @@ struct StageView: View {
     @State private var showOffsetSettings = false
     @State private var showSaveLayout = false
     @State private var offsetDraft = OffsetProfile()
-    @State private var editMenuOffset = CGSize.zero
     @State private var offsetMenuID = UUID()
-    @GestureState private var editMenuDrag = CGSize.zero
     @FocusState private var focusedField: StageFocusedField?
 
     var body: some View {
@@ -36,7 +34,6 @@ struct StageView: View {
 
             GeometryReader { proxy in
                 let canvasSize = stageCanvasSize(in: proxy.size)
-                let editPanelSize = CGSize(width: min(370, max(300, proxy.size.width - 24)), height: 220)
                 let offsetPanelSize = CGSize(width: min(560, max(340, proxy.size.width - 24)), height: 285)
                 ZStack {
                     Color(red: 0.045, green: 0.048, blue: 0.052)
@@ -62,24 +59,6 @@ struct StageView: View {
                             .stroke(.white.opacity(editMode ? 0.24 : 0.08), lineWidth: 1)
                     }
                     .coordinateSpace(name: "stage")
-
-                    if editMode {
-                        editControlsOverlay
-                            .frame(width: editPanelSize.width, height: editPanelSize.height, alignment: .topLeading)
-                            .contentShape(Rectangle())
-                            .position(
-                                panelCenter(
-                                    panelSize: editPanelSize,
-                                    in: proxy.size,
-                                    anchor: CGPoint(x: 12, y: 12),
-                                    offset: CGSize(
-                                        width: editMenuOffset.width + editMenuDrag.width,
-                                        height: editMenuOffset.height + editMenuDrag.height
-                                    )
-                                )
-                            )
-                            .zIndex(10)
-                    }
 
                     if showOffsetSettings {
                         OffsetSettingsView(
@@ -407,6 +386,10 @@ struct StageView: View {
                 slotStatusStrip
             }
 
+            if editMode {
+                editControlsOverlay
+            }
+
         }
         .buttonStyle(.bordered)
         .controlSize(.regular)
@@ -492,7 +475,6 @@ struct StageView: View {
 
     private func closeEditMode() {
         editMode = false
-        editMenuOffset = .zero
         capture.status = "Edit mode off."
     }
 
@@ -552,14 +534,11 @@ struct StageView: View {
     private var editControlsOverlay: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
-                        .font(.system(size: 12, weight: .semibold))
-                    Spacer(minLength: 0)
-                }
-                .contentShape(Rectangle())
-                .gesture(editMenuDragGesture)
-                .help("Drag edit menu")
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("Edit")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer(minLength: 0)
 
                 Button {
                     closeEditMode()
@@ -634,17 +613,6 @@ struct StageView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(.white.opacity(0.12), lineWidth: 1)
         )
-    }
-
-    private var editMenuDragGesture: some Gesture {
-        DragGesture(minimumDistance: 1)
-            .updating($editMenuDrag) { value, state, _ in
-                state = value.translation
-            }
-            .onEnded { value in
-                editMenuOffset.width += value.translation.width
-                editMenuOffset.height += value.translation.height
-            }
     }
 
     private func stageCanvasSize(in available: CGSize) -> CGSize {
