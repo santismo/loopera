@@ -280,10 +280,31 @@ final class CaptureController: NSObject, ObservableObject {
             slots[slotPosition].isStopping = false
             slots[slotPosition].stoppingStartedAt = nil
             previousStoppingPhases[selectedSlotIndex] = nil
-            audioLoopEngine.setPlaying(slot: selectedSlotIndex, isPlaying: true)
-            loopPlaybackTimes[selectedSlotIndex] = 0
+            startPlaybackSynced(slot: selectedSlotIndex)
             loopPlaybackTimeUpdatedAt = Date()
             status = "Slot \(selectedSlotIndex) playing."
+        }
+    }
+
+    private func startPlaybackSynced(slot selectedSlotIndex: Int) {
+        if selectedSlotIndex == 1 {
+            audioLoopEngine.restart(slot: 1)
+            loopPlaybackTimes[1] = 0
+            for index in slots.indices where slots[index].state == .recorded && slots[index].isPlaying && slots[index].index != 1 {
+                audioLoopEngine.restartSyncedToMaster(slot: slots[index].index)
+                loopPlaybackTimes[slots[index].index] = 0
+            }
+            return
+        }
+
+        if let master = slots.first(where: { $0.index == 1 && $0.state == .recorded && $0.isPlaying }),
+           master.duration > 0 {
+            audioLoopEngine.restartSyncedToMaster(slot: selectedSlotIndex)
+            let phase = audioLoopEngine.phase(slot: selectedSlotIndex) ?? 0
+            loopPlaybackTimes[selectedSlotIndex] = phase * (slots.first(where: { $0.index == selectedSlotIndex })?.duration ?? 0)
+        } else {
+            audioLoopEngine.restart(slot: selectedSlotIndex)
+            loopPlaybackTimes[selectedSlotIndex] = 0
         }
     }
 
@@ -374,8 +395,12 @@ final class CaptureController: NSObject, ObservableObject {
             slots[index].isStopping = false
             slots[index].stoppingStartedAt = nil
             if shouldPlay {
-                audioLoopEngine.restart(slot: slots[index].index)
-                loopPlaybackTimes[slots[index].index] = 0
+                if slots[index].index == 1 {
+                    audioLoopEngine.restart(slot: 1)
+                } else {
+                    audioLoopEngine.restartSyncedToMaster(slot: slots[index].index)
+                }
+                loopPlaybackTimes[slots[index].index] = audioLoopEngine.phase(slot: slots[index].index).map { $0 * slots[index].duration } ?? 0
             } else {
                 slots[index].isStopping = true
                 slots[index].stoppingStartedAt = Date()
@@ -1044,10 +1069,10 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
             let startTrim = completedVideoStartTrims[recordingSlotIndex] ?? 0
             let startOffset: TimeInterval
             if recordingSlotIndex == 1 {
-                startOffset = (await detectedMediaAudioStartOffset(for: outputFileURL) ?? loopStartOffset()) + startTrim
+                startOffset = loopStartOffset() + startTrim
             } else {
-                startOffset = videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
-                    ?? recordingStartOffset()
+                startOffset = recordingStartOffset()
+                    ?? videoStartOffset(assetDuration: assetDuration, loopDuration: duration, endTrim: endTrim)
                     ?? 0
             }
             slots[slotPosition].url = outputFileURL

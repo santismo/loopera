@@ -9,7 +9,7 @@ enum LoopFadeMode: String, Codable, CaseIterable, Identifiable {
 }
 
 struct OffsetProfile: Codable, Equatable {
-    var videoStartOffsetMilliseconds: Double = -75
+    var videoStartOffsetMilliseconds: Double = 0
     var audioStopOffsetMilliseconds: Double = 0
     var crossfadeMilliseconds: Double = 45
     var loopFadeOutMilliseconds: Double = 180
@@ -42,10 +42,13 @@ enum OffsetProfileStore {
 
     private static let defaultKey = "Loopera.offsetProfile.default"
     private static let previousDefaultVideoStartOffsetMilliseconds = -35.0
-    private static let currentDefaultVideoStartOffsetMilliseconds = -75.0
+    private static let previousAdjustedVideoStartOffsetMilliseconds = -75.0
+    private static let currentDefaultVideoStartOffsetMilliseconds = 0.0
 
     private static func migrateDefaultVideoOffsetIfNeeded(_ profile: OffsetProfile) -> OffsetProfile {
-        guard abs(profile.videoStartOffsetMilliseconds - previousDefaultVideoStartOffsetMilliseconds) < 0.001 else {
+        guard abs(profile.videoStartOffsetMilliseconds - previousDefaultVideoStartOffsetMilliseconds) < 0.001 ||
+            abs(profile.videoStartOffsetMilliseconds - previousAdjustedVideoStartOffsetMilliseconds) < 0.001
+        else {
             return profile
         }
         var migrated = profile
