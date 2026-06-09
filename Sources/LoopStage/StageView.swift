@@ -26,6 +26,7 @@ struct StageView: View {
     @State private var showSaveLayout = false
     @State private var offsetDraft = OffsetProfile()
     @State private var editMenuOffset = CGSize.zero
+    @State private var offsetMenuID = UUID()
     @GestureState private var editMenuDrag = CGSize.zero
     @FocusState private var focusedField: StageFocusedField?
 
@@ -64,7 +65,8 @@ struct StageView: View {
 
                     if editMode {
                         editControlsOverlay
-                            .frame(width: editPanelSize.width, alignment: .leading)
+                            .frame(width: editPanelSize.width, height: editPanelSize.height, alignment: .topLeading)
+                            .contentShape(Rectangle())
                             .position(
                                 panelCenter(
                                     panelSize: editPanelSize,
@@ -89,10 +91,13 @@ struct StageView: View {
                                 capture.saveOffsetProfile(profile)
                             },
                             close: {
-                                showOffsetSettings = false
+                                closeOffsetSettings()
                             },
                             panelWidth: offsetPanelSize.width
                         )
+                        .id(offsetMenuID)
+                        .frame(width: offsetPanelSize.width, height: offsetPanelSize.height, alignment: .topLeading)
+                        .contentShape(Rectangle())
                         .position(
                             panelCenter(
                                 panelSize: offsetPanelSize,
@@ -107,6 +112,7 @@ struct StageView: View {
                         .zIndex(11)
                     }
                 }
+                .clipped()
             }
 
             AudioTimelineView(
@@ -341,17 +347,21 @@ struct StageView: View {
                 }
 
                 Button {
-                    offsetDraft = capture.offsetProfile
-                    showOffsetSettings = true
+                    openOffsetSettings()
                 } label: {
                     Label("Offset", systemImage: "slider.horizontal.2.square")
                 }
                 .help("Audio/video offset and fade settings")
 
-                Toggle(isOn: $editMode) {
+                Button {
+                    toggleEditMode()
+                } label: {
                     Label("Edit", systemImage: "slider.horizontal.3")
                 }
-                .toggleStyle(.button)
+                .buttonStyle(.bordered)
+                .foregroundStyle(editMode ? .black : .white)
+                .background(editMode ? Color.white.opacity(0.78) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
 
                 Button {
                     capture.clearLoops()
@@ -484,6 +494,31 @@ struct StageView: View {
         editMode = false
         editMenuOffset = .zero
         capture.status = "Edit mode off."
+    }
+
+    private func toggleEditMode() {
+        if editMode {
+            closeEditMode()
+        } else {
+            showOffsetSettings = false
+            editMode = true
+            if capture.selectedSlotIndex == nil {
+                capture.selectedSlotIndex = 1
+            }
+            capture.status = "Edit mode: drag slot rings and resize selected loop."
+        }
+    }
+
+    private func openOffsetSettings() {
+        closeEditMode()
+        offsetDraft = capture.offsetProfile
+        offsetMenuID = UUID()
+        showOffsetSettings = true
+    }
+
+    private func closeOffsetSettings() {
+        showOffsetSettings = false
+        offsetMenuID = UUID()
     }
 
     private func panelCenter(panelSize: CGSize, in available: CGSize, anchor: CGPoint, offset: CGSize) -> CGPoint {
