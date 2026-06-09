@@ -398,7 +398,13 @@ final class AudioLoopEngine: @unchecked Sendable {
         lock.unlock()
     }
 
-    func processInput(samples: InputBuffer, threshold: Float, preBufferMilliseconds: Double) -> InputAnalysis {
+    func processInput(
+        samples: InputBuffer,
+        inputSampleRate: Double?,
+        threshold: Float,
+        preBufferMilliseconds: Double
+    ) -> InputAnalysis {
+        let samples = resampledInputIfNeeded(samples, inputSampleRate: inputSampleRate)
         guard !samples.isEmpty else {
             return InputAnalysis(rms: 0, peak: 0, event: .none)
         }
@@ -622,6 +628,46 @@ final class AudioLoopEngine: @unchecked Sendable {
             loop.hasWrapped = false
             loop.isPlaying = true
         }
+    }
+
+    private func resampledInputIfNeeded(_ input: InputBuffer, inputSampleRate: Double?) -> InputBuffer {
+        guard let inputSampleRate,
+              inputSampleRate.isFinite,
+              inputSampleRate > 0,
+              sampleRate.isFinite,
+              sampleRate > 0,
+              abs(inputSampleRate - sampleRate) > 1,
+              !input.isEmpty
+        else { return input }
+
+        let ratio = sampleRate / inputSampleRate
+        let outputCount = max(1, Int((Double(input.count) * ratio).rounded()))
+        return InputBuffer(
+            left: resampleChannel(input.left, inputCount: input.count, outputCount: outputCount, ratio: ratio),
+            right: resampleChannel(input.right, inputCount: input.count, outputCount: outputCount, ratio: ratio)
+        )
+    }
+
+    private func resampleChannel(
+        _ source: [Float],
+        inputCount: Int,
+        outputCount: Int,
+        ratio: Double
+    ) -> [Float] {
+        guard inputCount > 1, outputCount > 0 else {
+            return Array(source.prefix(max(0, min(inputCount, outputCount))))
+        }
+
+        var output = [Float](repeating: 0, count: outputCount)
+        let maxIndex = inputCount - 1
+        for outputIndex in 0..<outputCount {
+            let sourcePosition = Double(outputIndex) / ratio
+            let lower = min(maxIndex, max(0, Int(sourcePosition.rounded(.down))))
+            let upper = min(maxIndex, lower + 1)
+            let fraction = Float(sourcePosition - Double(lower))
+            output[outputIndex] = source[lower] + (source[upper] - source[lower]) * fraction
+        }
+        return output
     }
 
     private func ensurePreBuffer(milliseconds: Double) {

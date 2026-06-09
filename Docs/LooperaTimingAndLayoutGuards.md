@@ -11,6 +11,10 @@ video finalization, edit mode, or layout preset code.
   audio loop recorded. Video can attach later.
 - Avoid copying the whole master recording buffer on the real-time stop path.
   Whole-buffer transfer in `AudioLoopEngine.finishRecording` is intentional.
+- Audio captured from `AVCaptureAudioDataOutput` must be normalized to the
+  looper engine sample rate before threshold, prebuffer, recording, and duration
+  math. A 44.1 kHz input played through a 48 kHz output engine will sound sped up
+  if the raw input frames are stored directly.
 
 ## Slave Loop Sync
 

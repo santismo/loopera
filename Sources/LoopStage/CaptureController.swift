@@ -1373,6 +1373,7 @@ extension CaptureController: AVCaptureAudioDataOutputSampleBufferDelegate {
 
         let analysis = audioLoopEngine.processInput(
             samples: capturedInput.buffer,
+            inputSampleRate: capturedInput.sampleRate,
             threshold: Float(thresholdForCapture),
             preBufferMilliseconds: thresholdLeadMillisecondsForCapture
         )
