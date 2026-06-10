@@ -195,7 +195,7 @@ struct StageView: View {
 
     private var toolbar: some View {
         VStack(alignment: .leading, spacing: 8) {
-            toolbarScrollRow {
+            HStack(spacing: 10) {
                 Text("🎥")
                     .font(.system(size: 22))
                     .frame(width: 34)
@@ -283,7 +283,7 @@ struct StageView: View {
                 .keyboardShortcut(.space, modifiers: [.shift])
             }
 
-            toolbarScrollRow {
+            HStack(spacing: 10) {
                 meter
 
                 HStack(spacing: 7) {
@@ -399,10 +399,10 @@ struct StageView: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.66))
                     .lineLimit(1)
-                    .frame(minWidth: 220, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            toolbarScrollRow {
+            HStack(spacing: 10) {
                 masterProgressBar
                 slotStatusStrip
                 masterVolumeControl
@@ -414,16 +414,6 @@ struct StageView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(.black.opacity(0.86))
-    }
-
-    private func toolbarScrollRow<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                content()
-            }
-            .fixedSize(horizontal: true, vertical: false)
-            .padding(.vertical, 1)
-        }
     }
 
     private var meter: some View {
