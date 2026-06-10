@@ -463,6 +463,19 @@ struct StageView: View {
             .frame(width: 180)
         } else {
             Menu {
+                if !capture.appWindowCaptureAccessGranted {
+                    Button {
+                        capture.requestAppWindowCaptureAccess()
+                    } label: {
+                        Label("Grant Screen Recording", systemImage: "lock.open")
+                    }
+                    Button {
+                        capture.openScreenRecordingSettings()
+                    } label: {
+                        Label("Open Privacy Settings", systemImage: "gear")
+                    }
+                    Divider()
+                }
                 Button {
                     capture.refreshAppWindowSources()
                 } label: {
@@ -482,6 +495,7 @@ struct StageView: View {
                                 Text(source.displayName)
                             }
                         }
+                        .disabled(!capture.appWindowCaptureAccessGranted)
                     }
                 }
             } label: {
@@ -950,6 +964,9 @@ struct StageView: View {
     }
 
     private var selectedWindowTitle: String {
+        guard capture.appWindowCaptureAccessGranted else {
+            return "Grant Screen Recording"
+        }
         guard let id = capture.selectedAppWindowID,
               let source = capture.appWindowSources.first(where: { $0.id == id }) else {
             return "Select Window"

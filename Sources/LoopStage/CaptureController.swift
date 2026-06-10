@@ -82,6 +82,7 @@ final class CaptureController: NSObject, ObservableObject {
     private let lastAudioDeviceIDKey = "Loopera.lastAudioDeviceID"
     private let lastAudioChannelPairStartKey = "Loopera.lastAudioChannelPairStart"
     private let masterVolumeKey = "Loopera.masterVolume"
+    private var appWindowRefreshTask: Task<Void, Never>?
 
     private struct CapturedStereoInput {
         var buffer: AudioLoopEngine.InputBuffer
@@ -185,20 +186,49 @@ final class CaptureController: NSObject, ObservableObject {
 
     func refreshAppWindowSources() {
         appWindowCaptureAccessGranted = AppWindowSourceStore.hasScreenCaptureAccess
-        appWindowSources = AppWindowSourceStore.currentWindows()
+        appWindowRefreshTask?.cancel()
+        applyAppWindowSources(AppWindowSourceStore.currentWindows())
+        guard appWindowCaptureAccessGranted else { return }
+
+        appWindowRefreshTask = Task { [weak self] in
+            let shareableWindows = await AppWindowSourceStore.shareableWindows()
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, !shareableWindows.isEmpty else { return }
+                self.applyAppWindowSources(shareableWindows)
+            }
+        }
+    }
+
+    private func applyAppWindowSources(_ sources: [AppWindowSource]) {
+        appWindowSources = sources
         if let selectedAppWindowID,
-           appWindowSources.contains(where: { $0.id == selectedAppWindowID }) {
+           sources.contains(where: { $0.id == selectedAppWindowID }) {
             return
         }
-        selectedAppWindowID = appWindowSources.first?.id
-        if appWindowSources.isEmpty {
+        selectedAppWindowID = sources.first?.id
+        if sources.isEmpty {
             status = appWindowCaptureAccessGranted
                 ? "No app windows found. Bring the source app out of fullscreen or refresh windows."
                 : "No app windows found. Screen Recording may need Loopera removed and re-added in System Settings."
         } else if appWindowCaptureAccessGranted {
-            status = "Found \(appWindowSources.count) app window(s)."
+            status = "Found \(sources.count) capturable app window(s)."
         } else {
-            status = "Found \(appWindowSources.count) app window(s). If preview is blank, remove/re-add Loopera in Screen Recording."
+            status = "Found \(sources.count) app window(s). Grant Screen Recording to capture them."
+        }
+    }
+
+    func requestAppWindowCaptureAccess() {
+        appWindowCaptureAccessGranted = AppWindowSourceStore.requestScreenCaptureAccess()
+        refreshAppWindowSources()
+        status = appWindowCaptureAccessGranted
+            ? "Screen Recording granted. Select an app window."
+            : "Screen Recording not granted. Enable Loopera in System Settings, then reopen Loopera."
+    }
+
+    func openScreenRecordingSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
         }
     }
 

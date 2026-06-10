@@ -27,6 +27,11 @@ enum AppWindowSourceStore {
         CGPreflightScreenCaptureAccess()
     }
 
+    @discardableResult
+    static func requestScreenCaptureAccess() -> Bool {
+        CGRequestScreenCaptureAccess()
+    }
+
     static func currentWindows(excludingProcessID: pid_t = ProcessInfo.processInfo.processIdentifier) -> [AppWindowSource] {
         guard let entries = CGWindowListCopyWindowInfo(
             [.optionAll, .excludeDesktopElements],
@@ -62,6 +67,40 @@ enum AppWindowSourceStore {
         }
         .sorted { lhs, rhs in
             lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+        }
+    }
+
+    static func shareableWindows(excludingProcessID: pid_t = ProcessInfo.processInfo.processIdentifier) async -> [AppWindowSource] {
+        guard hasScreenCaptureAccess, #available(macOS 14.0, *) else {
+            return []
+        }
+
+        do {
+            let content = try await SCShareableContent.current
+            return content.windows.compactMap { window in
+                guard window.owningApplication?.processID != excludingProcessID,
+                      window.frame.width >= 120,
+                      window.frame.height >= 90
+                else { return nil }
+
+                let owner = window.owningApplication?.applicationName
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? "App"
+                let title = (window.title ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !owner.isEmpty, owner != "Window Server" else { return nil }
+
+                return AppWindowSource(
+                    id: window.windowID,
+                    title: title,
+                    ownerName: owner,
+                    bounds: window.frame
+                )
+            }
+            .sorted { lhs, rhs in
+                lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+            }
+        } catch {
+            return []
         }
     }
 
@@ -177,6 +216,14 @@ final class AppWindowStreamFrameProvider: NSObject, SCStreamOutput, SCStreamDele
                     return
                 }
 
+                if let initialImage = await self.captureInitialImage(for: window) {
+                    self.stateQueue.sync {
+                        if self.currentWindowID == windowID {
+                            self.latestImage = initialImage
+                        }
+                    }
+                }
+
                 let config = SCStreamConfiguration()
                 config.width = max(16, Int(window.frame.width.rounded()))
                 config.height = max(16, Int(window.frame.height.rounded()))
@@ -212,6 +259,28 @@ final class AppWindowStreamFrameProvider: NSObject, SCStreamOutput, SCStreamDele
         }
     }
 
+    @available(macOS 14.0, *)
+    private func captureInitialImage(for window: SCWindow) async -> CGImage? {
+        let config = SCStreamConfiguration()
+        config.width = max(16, Int(window.frame.width.rounded()))
+        config.height = max(16, Int(window.frame.height.rounded()))
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.scalesToFit = true
+        config.preservesAspectRatio = true
+        config.showsCursor = false
+        config.capturesAudio = false
+        config.ignoreShadowsSingleWindow = true
+        config.ignoreGlobalClipSingleWindow = true
+        config.shouldBeOpaque = true
+
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        return await withCheckedContinuation { continuation in
+            SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, _ in
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
     private func finishStarting(failedWindowID: CGWindowID? = nil) {
         stateQueue.sync {
             isStarting = false
@@ -229,9 +298,7 @@ final class AppWindowStreamFrameProvider: NSObject, SCStreamOutput, SCStreamDele
         else { return }
 
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent),
-              !AppWindowSourceStore.isEffectivelyBlack(cgImage)
-        else { return }
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
 
         stateQueue.sync {
             latestImage = cgImage
