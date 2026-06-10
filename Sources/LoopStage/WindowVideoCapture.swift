@@ -66,6 +66,8 @@ enum AppWindowSourceStore {
     }
 
     static func snapshot(windowID: CGWindowID) -> CGImage? {
+        guard hasScreenCaptureAccess else { return nil }
+
         if let streamImage = AppWindowStreamFrameProvider.shared.snapshot(windowID: windowID) {
             return streamImage
         }
