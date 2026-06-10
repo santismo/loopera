@@ -1,4 +1,6 @@
+import AudioToolbox
 import AVFoundation
+import CoreAudio
 import Foundation
 
 final class AudioLoopEngine: @unchecked Sendable {
@@ -73,12 +75,14 @@ final class AudioLoopEngine: @unchecked Sendable {
     private var fadeOutMilliseconds: Double = 180
     private var fadeMode: LoopFadeMode = .toLoopEnd
     private var masterVolume: Float = 1
+    private var selectedOutputDeviceUID: String?
 
     init() {
         configureEngine()
     }
 
     func start() {
+        applySelectedOutputDevice()
         if !engine.isRunning {
             try? engine.start()
         }
@@ -110,6 +114,20 @@ final class AudioLoopEngine: @unchecked Sendable {
         lock.lock()
         masterVolume = Float(max(0, min(1.5, volume)))
         lock.unlock()
+    }
+
+    @discardableResult
+    func setOutputDevice(uniqueID: String?) -> Bool {
+        selectedOutputDeviceUID = uniqueID
+        let wasRunning = engine.isRunning
+        if wasRunning {
+            engine.pause()
+        }
+        let didApply = applySelectedOutputDevice()
+        if wasRunning {
+            try? engine.start()
+        }
+        return didApply
     }
 
     func armThreshold(slot: Int, preBufferMilliseconds: Double) {
@@ -466,6 +484,104 @@ final class AudioLoopEngine: @unchecked Sendable {
         sourceNode = node
         engine.attach(node)
         engine.connect(node, to: engine.mainMixerNode, format: format)
+    }
+
+    @discardableResult
+    private func applySelectedOutputDevice() -> Bool {
+        guard let audioUnit = engine.outputNode.audioUnit else { return false }
+        let deviceID: AudioDeviceID
+        if let selectedOutputDeviceUID {
+            guard let selectedDeviceID = Self.audioDeviceID(forUID: selectedOutputDeviceUID) else {
+                return false
+            }
+            deviceID = selectedDeviceID
+        } else {
+            guard let defaultDeviceID = Self.defaultOutputDeviceID() else {
+                return false
+            }
+            deviceID = defaultDeviceID
+        }
+
+        var mutableDeviceID = deviceID
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &mutableDeviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        return status == noErr
+    }
+
+    private static func defaultOutputDeviceID() -> AudioDeviceID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var deviceID = AudioDeviceID()
+        var dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &dataSize,
+            &deviceID
+        ) == noErr else {
+            return nil
+        }
+        return deviceID
+    }
+
+    private static func audioDeviceID(forUID uid: String) -> AudioDeviceID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &dataSize
+        ) == noErr else {
+            return nil
+        }
+
+        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        var deviceIDs = Array(repeating: AudioDeviceID(), count: count)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &dataSize,
+            &deviceIDs
+        ) == noErr else {
+            return nil
+        }
+
+        return deviceIDs.first { deviceID in
+            stringProperty(kAudioDevicePropertyDeviceUID, deviceID: deviceID) == uid
+        }
+    }
+
+    private static func stringProperty(_ selector: AudioObjectPropertySelector, deviceID: AudioDeviceID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: CFString = "" as CFString
+        var dataSize = UInt32(MemoryLayout<CFString>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &value) == noErr else {
+            return nil
+        }
+        return value as String
     }
 
     private func render(frameCount: Int, audioBufferList: UnsafeMutablePointer<AudioBufferList>) {

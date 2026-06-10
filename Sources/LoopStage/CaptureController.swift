@@ -415,6 +415,13 @@ final class CaptureController: NSObject, ObservableObject {
         audioLoopEngine.performanceOutputHandler = handler
     }
 
+    func setAudioOutputDevice(_ uniqueID: String?) {
+        let applied = audioLoopEngine.setOutputDevice(uniqueID: uniqueID)
+        status = applied
+            ? "Loop audio output selected."
+            : "Could not apply selected loop audio output."
+    }
+
     func applyOffsetProfile(_ profile: OffsetProfile) {
         offsetProfile = profile
         crossfadeMilliseconds = profile.crossfadeMilliseconds

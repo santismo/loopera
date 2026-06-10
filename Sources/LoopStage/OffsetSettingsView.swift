@@ -43,7 +43,6 @@ struct OffsetSettingsView: View {
                 numberRow("Audio Stop ms", value: $profile.audioStopOffsetMilliseconds)
                 numberRow("Crossfade ms", value: $profile.crossfadeMilliseconds)
                 numberRow("Fade Out ms", value: $profile.loopFadeOutMilliseconds)
-                numberRow("Render A/V ms", value: $profile.renderAudioOffsetMilliseconds)
 
                 GridRow {
                     Text("Fade Mode")
@@ -55,12 +54,6 @@ struct OffsetSettingsView: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(width: 230)
-                }
-
-                GridRow {
-                    Text("Open Render")
-                    Toggle("", isOn: $profile.openRenderedPerformanceWhenDone)
-                        .labelsHidden()
                 }
             }
 
