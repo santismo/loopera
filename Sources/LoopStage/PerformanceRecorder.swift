@@ -27,12 +27,16 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private let captureQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.capture", qos: .userInteractive)
     private let sampleQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.samples")
     private static let targetFrameRate: Int32 = 60
-    private static let maxCatchUpFrames: Int64 = 8
+    private static let maxCatchUpFrames: Int64 = Int64(targetFrameRate)
 
     @MainActor
     func apply(profile: OffsetProfile) {
         renderAudioOffsetMilliseconds = profile.renderAudioOffsetMilliseconds
         openRenderedPerformanceWhenDone = profile.openRenderedPerformanceWhenDone
+    }
+
+    func renderAdjustedCopy(sourceURL: URL) async -> URL? {
+        await renderAudioOffset(sourceURL: sourceURL, offsetSeconds: renderAudioOffsetMilliseconds / 1000)
     }
 
     @MainActor
@@ -321,11 +325,6 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             finalURL = sourceURL
         }
 
-        if openRenderedPerformanceWhenDone {
-            await MainActor.run {
-                _ = NSWorkspace.shared.open(finalURL)
-            }
-        }
         return finalURL
     }
 

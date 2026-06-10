@@ -155,7 +155,7 @@ struct LoopPlayerView: NSViewRepresentable {
                 self.player = player
                 playerLayer = layer
                 layer.player = player
-                layer.videoGravity = .resizeAspect
+                layer.videoGravity = .resizeAspectFill
                 layer.opacity = 0
                 let initialSeconds = targetVideoSeconds(
                     syncTime: syncTime,
@@ -334,7 +334,7 @@ final class PlayerHostView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.masksToBounds = true
-        playerLayer.videoGravity = .resizeAspect
+        playerLayer.videoGravity = .resizeAspectFill
         layer?.addSublayer(playerLayer)
     }
 
@@ -342,7 +342,7 @@ final class PlayerHostView: NSView {
         super.init(coder: coder)
         wantsLayer = true
         layer?.masksToBounds = true
-        playerLayer.videoGravity = .resizeAspect
+        playerLayer.videoGravity = .resizeAspectFill
         layer?.addSublayer(playerLayer)
     }
 

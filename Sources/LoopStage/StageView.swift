@@ -1,5 +1,6 @@
 import AppKit
-import AVFoundation
+@preconcurrency import AVFoundation
+@preconcurrency import AVKit
 import SwiftUI
 
 private enum StageFocusedField: Hashable {
@@ -29,6 +30,7 @@ struct StageView: View {
     @State private var offsetMenuID = UUID()
     @State private var editPanelOffset = CGSize.zero
     @State private var toolbarResetID = UUID()
+    @State private var reviewedPerformanceURL: URL?
     @GestureState private var editPanelDrag = CGSize.zero
     @FocusState private var focusedField: StageFocusedField?
 
@@ -130,6 +132,17 @@ struct StageView: View {
                 playbackTimeUpdatedAt: capture.loopPlaybackTimeUpdatedAt
             )
             .frame(height: 148)
+
+            if let reviewURL = reviewedPerformanceURL {
+                PerformanceReviewPanel(
+                    url: reviewURL,
+                    offsetMilliseconds: renderAudioOffsetBinding,
+                    openWhenDone: renderOpenBinding,
+                    saveSettings: saveRenderSettings,
+                    rerender: rerenderLastPerformance
+                )
+                .frame(height: 185)
+            }
         }
         .background(Color(red: 0.10, green: 0.105, blue: 0.11))
         .background(KeyEventMonitor { event in
@@ -175,6 +188,11 @@ struct StageView: View {
         }
         .onChange(of: livePreviewZoom) { _, zoom in
             capture.setLivePreviewZoom(zoom)
+        }
+        .onChange(of: performance.lastRecordingURL) { _, url in
+            if capture.offsetProfile.openRenderedPerformanceWhenDone {
+                reviewedPerformanceURL = url
+            }
         }
         .onDisappear {
             shutdownAudioAndCapture()
@@ -386,6 +404,20 @@ struct StageView: View {
                     }
                 } label: {
                     Label(performance.isRecording ? "Stop Performance" : "Record Performance", systemImage: "rectangle.dashed.badge.record")
+                }
+
+                HStack(spacing: 5) {
+                    Text("Render")
+                        .font(.system(size: 11, weight: .medium))
+                    RenderOffsetField(value: renderAudioOffsetBinding)
+                        .frame(width: 74)
+                    Toggle("", isOn: renderOpenBinding)
+                        .labelsHidden()
+                        .help("Show render in Loopera when done")
+                    Button("Save") {
+                        saveRenderSettings()
+                    }
+                    .help("Save render offset defaults")
                 }
 
                 Button {
@@ -612,6 +644,47 @@ struct StageView: View {
 
     private func openPerformanceFolder() {
         NSWorkspace.shared.open(PerformanceRecorder.recordingsDirectory)
+    }
+
+    private var renderAudioOffsetBinding: Binding<Double> {
+        Binding(
+            get: { capture.offsetProfile.renderAudioOffsetMilliseconds },
+            set: { newValue in
+                var profile = capture.offsetProfile
+                profile.renderAudioOffsetMilliseconds = newValue
+                capture.applyOffsetProfile(profile)
+                performance.apply(profile: profile)
+            }
+        )
+    }
+
+    private var renderOpenBinding: Binding<Bool> {
+        Binding(
+            get: { capture.offsetProfile.openRenderedPerformanceWhenDone },
+            set: { newValue in
+                var profile = capture.offsetProfile
+                profile.openRenderedPerformanceWhenDone = newValue
+                capture.applyOffsetProfile(profile)
+                performance.apply(profile: profile)
+            }
+        )
+    }
+
+    private func saveRenderSettings() {
+        capture.saveOffsetProfile(capture.offsetProfile)
+        performance.apply(profile: capture.offsetProfile)
+    }
+
+    private func rerenderLastPerformance() {
+        guard let url = reviewedPerformanceURL ?? performance.lastRecordingURL else { return }
+        performance.apply(profile: capture.offsetProfile)
+        Task {
+            if let rendered = await performance.renderAdjustedCopy(sourceURL: url) {
+                await MainActor.run {
+                    reviewedPerformanceURL = rendered
+                }
+            }
+        }
     }
 
     private func toggleMetronome() {
@@ -1921,5 +1994,212 @@ private struct StageCaptureView: NSViewRepresentable {
         override func hitTest(_ point: NSPoint) -> NSView? {
             nil
         }
+    }
+}
+
+private struct PerformanceReviewPanel: View {
+    let url: URL
+    @Binding var offsetMilliseconds: Double
+    @Binding var openWhenDone: Bool
+    let saveSettings: () -> Void
+    let rerender: () -> Void
+    @State private var player: AVPlayer?
+    @State private var waveform: [Double] = []
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VideoPlayer(player: player)
+                .frame(width: 245)
+                .background(.black)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("Render Review")
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Button {
+                        player?.seek(to: .zero)
+                        player?.play()
+                    } label: {
+                        Image(systemName: "play.fill")
+                    }
+                    Button {
+                        player?.pause()
+                    } label: {
+                        Image(systemName: "pause.fill")
+                    }
+                    Button("Render") {
+                        rerender()
+                    }
+                    Button("Save") {
+                        saveSettings()
+                    }
+                }
+
+                PerformanceWaveformView(samples: waveform)
+                    .frame(height: 54)
+                    .background(.white.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                HStack(spacing: 8) {
+                    Text("A/V ms")
+                        .font(.system(size: 11, weight: .medium))
+                    RenderOffsetField(value: $offsetMilliseconds)
+                        .frame(width: 90)
+                    Toggle("Open", isOn: $openWhenDone)
+                        .font(.system(size: 11, weight: .medium))
+                    Text(url.lastPathComponent)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.black.opacity(0.72))
+        .foregroundStyle(.white)
+        .onAppear {
+            load(url)
+        }
+        .onChange(of: url) { _, nextURL in
+            load(nextURL)
+        }
+    }
+
+    private func load(_ url: URL) {
+        player = AVPlayer(url: url)
+        Task {
+            let samples = await Self.loadWaveform(url: url)
+            await MainActor.run {
+                waveform = samples
+            }
+        }
+    }
+
+    private static func loadWaveform(url: URL) async -> [Double] {
+        let asset = AVURLAsset(url: url)
+        do {
+            guard let track = try await asset.loadTracks(withMediaType: .audio).first else { return [] }
+            let reader = try AVAssetReader(asset: asset)
+            let output = AVAssetReaderTrackOutput(
+                track: track,
+                outputSettings: [
+                    AVFormatIDKey: kAudioFormatLinearPCM,
+                    AVLinearPCMIsFloatKey: true,
+                    AVLinearPCMBitDepthKey: 32,
+                    AVLinearPCMIsNonInterleaved: false
+                ]
+            )
+            guard reader.canAdd(output) else { return [] }
+            reader.add(output)
+            guard reader.startReading() else { return [] }
+
+            var buckets = [Double](repeating: 0, count: 240)
+            var frameCursor = 0
+            let duration = try await asset.load(.duration).seconds
+            let estimatedFrames = max(1, Int(duration * 48_000))
+            let framesPerBucket = max(1, estimatedFrames / buckets.count)
+
+            while let sampleBuffer = output.copyNextSampleBuffer() {
+                guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+                      let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)
+                else { continue }
+                let channels = max(1, Int(streamDescription.pointee.mChannelsPerFrame))
+                var blockBuffer: CMBlockBuffer?
+                var audioBufferList = AudioBufferList()
+                let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                    sampleBuffer,
+                    bufferListSizeNeededOut: nil,
+                    bufferListOut: &audioBufferList,
+                    bufferListSize: MemoryLayout<AudioBufferList>.size,
+                    blockBufferAllocator: kCFAllocatorDefault,
+                    blockBufferMemoryAllocator: kCFAllocatorDefault,
+                    flags: 0,
+                    blockBufferOut: &blockBuffer
+                )
+                guard status == noErr,
+                      let data = audioBufferList.mBuffers.mData?.assumingMemoryBound(to: Float.self)
+                else { continue }
+                let floatCount = Int(audioBufferList.mBuffers.mDataByteSize) / MemoryLayout<Float>.size
+                let frameCount = floatCount / channels
+                for frame in 0..<frameCount {
+                    let bucket = min(buckets.count - 1, frameCursor / framesPerBucket)
+                    var peak: Double = 0
+                    for channel in 0..<channels {
+                        peak = max(peak, Double(abs(data[frame * channels + channel])))
+                    }
+                    buckets[bucket] = max(buckets[bucket], peak)
+                    frameCursor += 1
+                }
+            }
+            let maxPeak = max(0.0001, buckets.max() ?? 0.0001)
+            return buckets.map { min(1, $0 / maxPeak) }
+        } catch {
+            return []
+        }
+    }
+}
+
+private struct PerformanceWaveformView: View {
+    let samples: [Double]
+
+    var body: some View {
+        GeometryReader { proxy in
+            let midY = proxy.size.height / 2
+            let step = proxy.size.width / CGFloat(max(1, samples.count - 1))
+            Path { path in
+                for (index, sample) in samples.enumerated() {
+                    let x = CGFloat(index) * step
+                    let height = max(1, CGFloat(sample) * proxy.size.height * 0.46)
+                    path.move(to: CGPoint(x: x, y: midY - height))
+                    path.addLine(to: CGPoint(x: x, y: midY + height))
+                }
+            }
+            .stroke(Color.white.opacity(0.82), lineWidth: 1)
+        }
+    }
+}
+
+private struct RenderOffsetField: View {
+    @Binding var value: Double
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("", text: Binding(
+            get: { focused ? text : Self.format(value) },
+            set: { next in
+                text = next
+                if let parsed = Double(next.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    value = parsed
+                }
+            }
+        ))
+        .textFieldStyle(.roundedBorder)
+        .focused($focused)
+        .onAppear {
+            text = Self.format(value)
+        }
+        .onChange(of: focused) { _, isFocused in
+            if isFocused {
+                text = Self.format(value)
+            } else {
+                if let parsed = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    value = parsed
+                }
+                text = Self.format(value)
+            }
+        }
+        .onChange(of: value) { _, nextValue in
+            if !focused {
+                text = Self.format(nextValue)
+            }
+        }
+    }
+
+    private static func format(_ value: Double) -> String {
+        value.rounded() == value ? String(Int(value)) : String(format: "%.1f", value)
     }
 }
