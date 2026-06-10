@@ -211,11 +211,6 @@ final class CaptureController: NSObject, ObservableObject {
         }
     }
 
-    func requestAppWindowCaptureAccess() {
-        appWindowCaptureAccessGranted = AppWindowSourceStore.requestScreenCaptureAccess()
-        refreshAppWindowSources()
-    }
-
     func selectAppWindow(_ windowID: CGWindowID) {
         selectedAppWindowID = windowID
         status = "App window selected."

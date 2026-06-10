@@ -27,11 +27,6 @@ enum AppWindowSourceStore {
         CGPreflightScreenCaptureAccess()
     }
 
-    @discardableResult
-    static func requestScreenCaptureAccess() -> Bool {
-        CGRequestScreenCaptureAccess()
-    }
-
     static func currentWindows(excludingProcessID: pid_t = ProcessInfo.processInfo.processIdentifier) -> [AppWindowSource] {
         guard let entries = CGWindowListCopyWindowInfo(
             [.optionAll, .excludeDesktopElements],
@@ -75,10 +70,6 @@ enum AppWindowSourceStore {
             return streamImage
         }
 
-        if let screenCaptureImage = screenCaptureKitSnapshot(windowID: windowID) {
-            return screenCaptureImage
-        }
-
         let direct = CGWindowListCreateImage(
             .null,
             .optionIncludingWindow,
@@ -88,98 +79,7 @@ enum AppWindowSourceStore {
         if let direct, !isEffectivelyBlack(direct) {
             return direct
         }
-        return visibleDisplaySnapshot(windowID: windowID) ?? direct
-    }
-
-    private static func screenCaptureKitSnapshot(windowID: CGWindowID) -> CGImage? {
-        guard #available(macOS 14.0, *) else { return nil }
-
-        let semaphore = DispatchSemaphore(value: 0)
-        nonisolated(unsafe) var capturedImage: CGImage?
-
-        Task {
-            do {
-                let content = try await SCShareableContent.current
-                guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
-                    semaphore.signal()
-                    return
-                }
-
-                let config = SCStreamConfiguration()
-                let width = max(16, Int(window.frame.width.rounded()))
-                let height = max(16, Int(window.frame.height.rounded()))
-                config.width = width
-                config.height = height
-                config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-                config.pixelFormat = kCVPixelFormatType_32BGRA
-                config.scalesToFit = true
-                config.preservesAspectRatio = true
-                config.showsCursor = false
-                config.capturesAudio = false
-                config.ignoreShadowsSingleWindow = true
-                config.ignoreGlobalClipSingleWindow = true
-                config.shouldBeOpaque = true
-
-                let filter = SCContentFilter(desktopIndependentWindow: window)
-                SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, _ in
-                    if let image, !isEffectivelyBlack(image) {
-                        capturedImage = image
-                    }
-                    semaphore.signal()
-                }
-            } catch {
-                semaphore.signal()
-            }
-        }
-
-        _ = semaphore.wait(timeout: .now() + .milliseconds(180))
-        return capturedImage
-    }
-
-    private static func visibleDisplaySnapshot(windowID: CGWindowID) -> CGImage? {
-        guard let bounds = bounds(for: windowID), bounds.width > 0, bounds.height > 0 else {
-            return nil
-        }
-
-        var displayCount: UInt32 = 0
-        guard CGGetActiveDisplayList(0, nil, &displayCount) == .success, displayCount > 0 else {
-            return nil
-        }
-        var displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
-        guard CGGetActiveDisplayList(displayCount, &displays, &displayCount) == .success else {
-            return nil
-        }
-
-        let candidates = displays.compactMap { display -> (CGDirectDisplayID, CGRect, CGRect)? in
-            let displayBounds = CGDisplayBounds(display)
-            let intersection = bounds.intersection(displayBounds)
-            guard intersection.width > 1, intersection.height > 1 else { return nil }
-            return (display, displayBounds, intersection)
-        }
-        guard let best = candidates.max(by: { $0.2.width * $0.2.height < $1.2.width * $1.2.height }),
-              let displayImage = CGDisplayCreateImage(best.0)
-        else { return nil }
-
-        let scaleX = CGFloat(displayImage.width) / max(1, best.1.width)
-        let scaleY = CGFloat(displayImage.height) / max(1, best.1.height)
-        let cropRect = CGRect(
-            x: (best.2.minX - best.1.minX) * scaleX,
-            y: (best.2.minY - best.1.minY) * scaleY,
-            width: best.2.width * scaleX,
-            height: best.2.height * scaleY
-        )
-        .integral
-        .intersection(CGRect(x: 0, y: 0, width: displayImage.width, height: displayImage.height))
-
-        guard cropRect.width > 0, cropRect.height > 0 else { return nil }
-        return displayImage.cropping(to: cropRect)
-    }
-
-    private static func bounds(for windowID: CGWindowID) -> CGRect? {
-        guard let entries = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
-              let boundsInfo = entries.first?[kCGWindowBounds as String] as? [String: Any]
-        else { return nil }
-        return CGRect(dictionaryRepresentation: boundsInfo as CFDictionary)
+        return nil
     }
 
     static func isEffectivelyBlack(_ image: CGImage) -> Bool {
@@ -221,12 +121,16 @@ final class AppWindowStreamFrameProvider: NSObject, SCStreamOutput, SCStreamDele
     private var currentWindowID: CGWindowID?
     private var latestImage: CGImage?
     private var isStarting = false
+    private var lastFailedWindowID: CGWindowID?
+    private var lastFailureDate = Date.distantPast
 
     func snapshot(windowID: CGWindowID) -> CGImage? {
-        let state = stateQueue.sync {
-            (
+        let state = stateQueue.sync { () -> (image: CGImage?, shouldStart: Bool) in
+            let recentFailure = lastFailedWindowID == windowID &&
+                Date().timeIntervalSince(lastFailureDate) < 6
+            return (
                 image: currentWindowID == windowID ? latestImage : nil,
-                shouldStart: currentWindowID != windowID || (stream == nil && !isStarting)
+                shouldStart: !recentFailure && (currentWindowID != windowID || (stream == nil && !isStarting))
             )
         }
 
@@ -244,6 +148,7 @@ final class AppWindowStreamFrameProvider: NSObject, SCStreamOutput, SCStreamDele
             isStarting = true
             latestImage = nil
             currentWindowID = windowID
+            lastFailedWindowID = nil
             let previousStream = stream
             stream = nil
             return (true, previousStream)
@@ -266,7 +171,7 @@ final class AppWindowStreamFrameProvider: NSObject, SCStreamOutput, SCStreamDele
             do {
                 let content = try await SCShareableContent.current
                 guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
-                    self.finishStarting()
+                    self.finishStarting(failedWindowID: windowID)
                     return
                 }
 
@@ -300,14 +205,18 @@ final class AppWindowStreamFrameProvider: NSObject, SCStreamOutput, SCStreamDele
                     self.finishStarting()
                 }
             } catch {
-                self.finishStarting()
+                self.finishStarting(failedWindowID: windowID)
             }
         }
     }
 
-    private func finishStarting() {
+    private func finishStarting(failedWindowID: CGWindowID? = nil) {
         stateQueue.sync {
             isStarting = false
+            if let failedWindowID {
+                lastFailedWindowID = failedWindowID
+                lastFailureDate = Date()
+            }
         }
     }
 
