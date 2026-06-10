@@ -146,7 +146,6 @@ struct StageView: View {
             offsetDraft = capture.offsetProfile
             capture.setLivePreviewZoom(livePreviewZoom)
             capture.refreshAppWindowSources()
-            capture.setAudioOutputDevice(output.selectedDeviceID)
             metronome.bpm = capture.tempoBPM ?? 120
             capture.performanceAudioHandler = { input, sampleRate, presentationTime in
                 performance.appendLiveAudio(input: input, sampleRate: sampleRate, presentationTime: presentationTime)
@@ -929,10 +928,8 @@ struct StageView: View {
                     output.refresh()
                     output.select(outputID)
                 }
-                capture.setAudioOutputDevice(output.selectedDeviceID)
             } else {
                 output.selectSystemOutput()
-                capture.setAudioOutputDevice(nil)
             }
             capture.status = "Loaded layout: \(name)."
         } catch {
