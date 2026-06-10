@@ -68,6 +68,8 @@ final class CaptureController: NSObject, ObservableObject {
     private var pendingStopTargetDuration: TimeInterval?
     private var quantizeTask: Task<Void, Never>?
     private var reconfigureTask: Task<Void, Never>?
+    private var outputRouteTask: Task<Void, Never>?
+    private var outputRouteRequestID = 0
     private var previousMasterPhase: Double?
     private var previousStoppingPhases: [Int: Double] = [:]
     private var lastPlaybackPublishDate = Date.distantPast
@@ -416,10 +418,26 @@ final class CaptureController: NSObject, ObservableObject {
     }
 
     func setAudioOutputDevice(_ uniqueID: String?) {
-        let applied = audioLoopEngine.setOutputDevice(uniqueID: uniqueID)
-        status = applied
-            ? "Loop audio output selected."
-            : "Could not apply selected loop audio output."
+        outputRouteRequestID += 1
+        let requestID = outputRouteRequestID
+        let audioLoopEngine = audioLoopEngine
+
+        outputRouteTask?.cancel()
+        status = "Applying loop audio output..."
+        outputRouteTask = Task { [weak self] in
+            let applied = await Task.detached(priority: .userInitiated) {
+                audioLoopEngine.setOutputDevice(uniqueID: uniqueID)
+            }.value
+
+            guard !Task.isCancelled,
+                  let self,
+                  self.outputRouteRequestID == requestID
+            else { return }
+
+            self.status = applied
+                ? "Loop audio output selected."
+                : "Could not apply selected loop audio output."
+        }
     }
 
     func applyOffsetProfile(_ profile: OffsetProfile) {

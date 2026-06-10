@@ -118,6 +118,9 @@ final class AudioLoopEngine: @unchecked Sendable {
 
     @discardableResult
     func setOutputDevice(uniqueID: String?) -> Bool {
+        if selectedOutputDeviceUID == uniqueID {
+            return true
+        }
         selectedOutputDeviceUID = uniqueID
         let wasRunning = engine.isRunning
         if wasRunning {
