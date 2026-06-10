@@ -1,5 +1,6 @@
 import AppKit
 @preconcurrency import AVFoundation
+import CoreImage
 @preconcurrency import ScreenCaptureKit
 import SwiftUI
 
@@ -70,6 +71,10 @@ enum AppWindowSourceStore {
     }
 
     static func snapshot(windowID: CGWindowID) -> CGImage? {
+        if let streamImage = AppWindowStreamFrameProvider.shared.snapshot(windowID: windowID) {
+            return streamImage
+        }
+
         if let screenCaptureImage = screenCaptureKitSnapshot(windowID: windowID) {
             return screenCaptureImage
         }
@@ -177,7 +182,7 @@ enum AppWindowSourceStore {
         return CGRect(dictionaryRepresentation: boundsInfo as CFDictionary)
     }
 
-    private static func isEffectivelyBlack(_ image: CGImage) -> Bool {
+    static func isEffectivelyBlack(_ image: CGImage) -> Bool {
         let width = 16
         let height = 16
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
@@ -203,6 +208,133 @@ enum AppWindowSourceStore {
             }
         }
         return brightPixels < 3
+    }
+}
+
+final class AppWindowStreamFrameProvider: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    static let shared = AppWindowStreamFrameProvider()
+
+    private let stateQueue = DispatchQueue(label: "Loopera.AppWindowStreamFrameProvider.state")
+    private let outputQueue = DispatchQueue(label: "Loopera.AppWindowStreamFrameProvider.output", qos: .userInteractive)
+    private let ciContext = CIContext(options: [.cacheIntermediates: false])
+    private var stream: SCStream?
+    private var currentWindowID: CGWindowID?
+    private var latestImage: CGImage?
+    private var isStarting = false
+
+    func snapshot(windowID: CGWindowID) -> CGImage? {
+        let state = stateQueue.sync {
+            (
+                image: currentWindowID == windowID ? latestImage : nil,
+                shouldStart: currentWindowID != windowID || (stream == nil && !isStarting)
+            )
+        }
+
+        if state.shouldStart {
+            start(windowID: windowID)
+        }
+        return state.image
+    }
+
+    private func start(windowID: CGWindowID) {
+        let startState = stateQueue.sync { () -> (shouldStart: Bool, oldStream: SCStream?) in
+            if isStarting {
+                return (false, nil)
+            }
+            isStarting = true
+            latestImage = nil
+            currentWindowID = windowID
+            let previousStream = stream
+            stream = nil
+            return (true, previousStream)
+        }
+        guard startState.shouldStart else {
+            return
+        }
+
+        if let oldStream = startState.oldStream {
+            oldStream.stopCapture { _ in }
+        }
+
+        guard #available(macOS 14.0, *) else {
+            finishStarting()
+            return
+        }
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let content = try await SCShareableContent.current
+                guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+                    self.finishStarting()
+                    return
+                }
+
+                let config = SCStreamConfiguration()
+                config.width = max(16, Int(window.frame.width.rounded()))
+                config.height = max(16, Int(window.frame.height.rounded()))
+                config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+                config.pixelFormat = kCVPixelFormatType_32BGRA
+                config.scalesToFit = true
+                config.preservesAspectRatio = true
+                config.showsCursor = false
+                config.capturesAudio = false
+                config.queueDepth = 3
+                config.ignoreShadowsSingleWindow = true
+                config.ignoreGlobalClipSingleWindow = true
+                config.shouldBeOpaque = true
+
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                let stream = SCStream(filter: filter, configuration: config, delegate: self)
+                try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
+                try await stream.startCapture()
+
+                let keepStream = self.stateQueue.sync { () -> Bool in
+                    guard self.currentWindowID == windowID else { return false }
+                    self.stream = stream
+                    self.isStarting = false
+                    return true
+                }
+                if !keepStream {
+                    stream.stopCapture { _ in }
+                    self.finishStarting()
+                }
+            } catch {
+                self.finishStarting()
+            }
+        }
+    }
+
+    private func finishStarting() {
+        stateQueue.sync {
+            isStarting = false
+        }
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen,
+              CMSampleBufferIsValid(sampleBuffer),
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
+        else { return }
+
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent),
+              !AppWindowSourceStore.isEffectivelyBlack(cgImage)
+        else { return }
+
+        stateQueue.sync {
+            latestImage = cgImage
+        }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        stateQueue.sync {
+            if self.stream === stream {
+                self.stream = nil
+                latestImage = nil
+            }
+            isStarting = false
+        }
     }
 }
 

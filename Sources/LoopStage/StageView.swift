@@ -468,13 +468,6 @@ struct StageView: View {
                 } label: {
                     Label("Refresh Windows", systemImage: "arrow.clockwise")
                 }
-                if !capture.appWindowCaptureAccessGranted {
-                    Button {
-                        capture.requestAppWindowCaptureAccess()
-                    } label: {
-                        Label("Request Screen Recording", systemImage: "lock.open")
-                    }
-                }
                 Divider()
                 if capture.appWindowSources.isEmpty {
                     Text("No Windows")

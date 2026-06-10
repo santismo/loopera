@@ -205,9 +205,6 @@ final class CaptureController: NSObject, ObservableObject {
     func selectVideoInputMode(_ mode: VideoInputMode) {
         videoInputMode = mode
         if mode == .appWindow {
-            if !AppWindowSourceStore.hasScreenCaptureAccess {
-                appWindowCaptureAccessGranted = AppWindowSourceStore.requestScreenCaptureAccess()
-            }
             refreshAppWindowSources()
         } else {
             status = "Video source: \(mode.rawValue)."
