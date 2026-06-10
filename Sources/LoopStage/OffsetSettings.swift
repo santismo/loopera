@@ -14,6 +14,8 @@ struct OffsetProfile: Codable, Equatable {
     var crossfadeMilliseconds: Double = 45
     var loopFadeOutMilliseconds: Double = 180
     var loopFadeMode: LoopFadeMode = .toLoopEnd
+    var renderAudioOffsetMilliseconds: Double = 0
+    var openRenderedPerformanceWhenDone = false
 }
 
 enum OffsetProfileStore {

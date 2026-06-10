@@ -39,7 +39,7 @@ struct StageView: View {
 
             GeometryReader { proxy in
                 let canvasSize = stageCanvasSize(in: proxy.size)
-                let offsetPanelSize = CGSize(width: min(560, max(340, proxy.size.width - 24)), height: 285)
+                let offsetPanelSize = CGSize(width: min(560, max(340, proxy.size.width - 24)), height: 335)
                 let editPanelSize = CGSize(
                     width: min(370, max(300, proxy.size.width - 24)),
                     height: min(270, max(220, proxy.size.height - 24))
@@ -92,9 +92,11 @@ struct StageView: View {
                             profile: $offsetDraft,
                             apply: { profile in
                                 capture.applyOffsetProfile(profile)
+                                performance.apply(profile: profile)
                             },
                             save: { profile in
                                 capture.saveOffsetProfile(profile)
+                                performance.apply(profile: profile)
                             },
                             close: {
                                 closeOffsetSettings()
@@ -144,6 +146,7 @@ struct StageView: View {
         .onAppear {
             refreshSavedLayouts()
             offsetDraft = capture.offsetProfile
+            performance.apply(profile: capture.offsetProfile)
             capture.setLivePreviewZoom(livePreviewZoom)
             capture.refreshAppWindowSources()
             metronome.bpm = capture.tempoBPM ?? 120
@@ -192,7 +195,7 @@ struct StageView: View {
 
     private var toolbar: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
+            toolbarScrollRow {
                 Text("🎥")
                     .font(.system(size: 22))
                     .frame(width: 34)
@@ -280,7 +283,7 @@ struct StageView: View {
                 .keyboardShortcut(.space, modifiers: [.shift])
             }
 
-            HStack(spacing: 10) {
+            toolbarScrollRow {
                 meter
 
                 HStack(spacing: 7) {
@@ -315,7 +318,7 @@ struct StageView: View {
                         }
                         .help("Metronome tempo")
                     Button {
-                        toggleMetronome()
+                        setMetronomePlaying(!metronome.isPlaying)
                     } label: {
                         Image(systemName: metronome.isPlaying ? "stop.fill" : "play.fill")
                     }
@@ -375,6 +378,7 @@ struct StageView: View {
                         capture.setPerformanceLoopAudioHandler { input, sampleRate, presentationTime in
                             performance.appendLoopAudio(input: input, sampleRate: sampleRate, presentationTime: presentationTime)
                         }
+                        performance.apply(profile: capture.offsetProfile)
                         performance.start(microphoneDeviceID: capture.selectedAudioDeviceIDs.first, fallbackView: stageCaptureView)
                         if !performance.isRecording {
                             capture.setPerformanceLoopAudioHandler(nil)
@@ -395,10 +399,10 @@ struct StageView: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.66))
                     .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: 220, alignment: .leading)
             }
 
-            HStack(spacing: 10) {
+            toolbarScrollRow {
                 masterProgressBar
                 slotStatusStrip
                 masterVolumeControl
@@ -410,6 +414,16 @@ struct StageView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(.black.opacity(0.86))
+    }
+
+    private func toolbarScrollRow<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                content()
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.vertical, 1)
+        }
     }
 
     private var meter: some View {
@@ -611,8 +625,17 @@ struct StageView: View {
     }
 
     private func toggleMetronome() {
+        setMetronomePlaying(!metronome.isPlaying)
+    }
+
+    private func setMetronomePlaying(_ shouldPlay: Bool) {
         metronome.applyTempo()
-        metronome.togglePlay()
+        if shouldPlay {
+            metronome.play()
+        } else {
+            metronome.stop()
+        }
+
         if metronome.isPlaying {
             capture.tempoBPM = metronome.bpm
             capture.setMetronomeGrid(bpm: metronome.bpm, startDate: metronome.startedAt)

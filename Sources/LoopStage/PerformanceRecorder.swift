@@ -22,10 +22,18 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private var fallbackStartTime: Date?
     private var nextVideoFrameIndex: Int64 = 0
     private nonisolated(unsafe) var acceptingAudio = false
+    private var renderAudioOffsetMilliseconds: Double = 0
+    private var openRenderedPerformanceWhenDone = false
     private let captureQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.capture", qos: .userInteractive)
     private let sampleQueue = DispatchQueue(label: "Loopera.PerformanceRecorder.samples")
     private static let targetFrameRate: Int32 = 60
     private static let maxCatchUpFrames: Int64 = 8
+
+    @MainActor
+    func apply(profile: OffsetProfile) {
+        renderAudioOffsetMilliseconds = profile.renderAudioOffsetMilliseconds
+        openRenderedPerformanceWhenDone = profile.openRenderedPerformanceWhenDone
+    }
 
     @MainActor
     func start(microphoneDeviceID: String?, fallbackView: NSView?) {
@@ -279,19 +287,105 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
                 writer.finishWriting {
                     let finalStatus = writer.status
                     let errorText = writer.error?.localizedDescription
-                    Task { @MainActor in
+                    Task {
                         if finalStatus == .completed {
-                            self.status = "Saved performance recording."
+                            let finalURL = await self.finalizePerformanceRecording(at: writer.outputURL)
+                            await MainActor.run {
+                                self.lastRecordingURL = finalURL
+                                self.status = "Saved performance recording."
+                            }
                         } else if let errorText {
-                            self.status = "Performance recording failed: \(errorText)"
+                            await MainActor.run {
+                                self.status = "Performance recording failed: \(errorText)"
+                            }
                         } else {
-                            self.status = "Performance recording did not finish cleanly."
+                            await MainActor.run {
+                                self.status = "Performance recording did not finish cleanly."
+                            }
                         }
+                        continuation.resume()
                     }
-                    continuation.resume()
                 }
             }
         }
+    }
+
+    private func finalizePerformanceRecording(at sourceURL: URL) async -> URL {
+        let offsetSeconds = renderAudioOffsetMilliseconds / 1000
+        let shouldRenderOffset = offsetSeconds.isFinite && abs(offsetSeconds) >= 0.0005
+        let finalURL: URL
+        if shouldRenderOffset,
+           let renderedURL = await renderAudioOffset(sourceURL: sourceURL, offsetSeconds: offsetSeconds) {
+            finalURL = renderedURL
+        } else {
+            finalURL = sourceURL
+        }
+
+        if openRenderedPerformanceWhenDone {
+            await MainActor.run {
+                _ = NSWorkspace.shared.open(finalURL)
+            }
+        }
+        return finalURL
+    }
+
+    private func renderAudioOffset(sourceURL: URL, offsetSeconds: TimeInterval) async -> URL? {
+        let asset = AVURLAsset(url: sourceURL)
+        let composition = AVMutableComposition()
+        do {
+            let duration = try await asset.load(.duration)
+            let fullRange = CMTimeRange(start: .zero, duration: duration)
+
+            for track in try await asset.loadTracks(withMediaType: .video) {
+                guard let targetTrack = composition.addMutableTrack(
+                    withMediaType: .video,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                ) else { continue }
+                try targetTrack.insertTimeRange(fullRange, of: track, at: .zero)
+                targetTrack.preferredTransform = try await track.load(.preferredTransform)
+            }
+
+            let sourceAudioStart = offsetSeconds < 0
+                ? CMTime(seconds: abs(offsetSeconds), preferredTimescale: 48_000)
+                : .zero
+            let targetAudioStart = offsetSeconds > 0
+                ? CMTime(seconds: offsetSeconds, preferredTimescale: 48_000)
+                : .zero
+            let remainingDuration = CMTimeSubtract(duration, sourceAudioStart)
+            guard remainingDuration > .zero else { return nil }
+            let audioRange = CMTimeRange(start: sourceAudioStart, duration: remainingDuration)
+
+            for track in try await asset.loadTracks(withMediaType: .audio) {
+                guard let targetTrack = composition.addMutableTrack(
+                    withMediaType: .audio,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                ) else { continue }
+                try targetTrack.insertTimeRange(audioRange, of: track, at: targetAudioStart)
+            }
+
+            return await exportComposition(composition, sourceURL: sourceURL)
+        } catch {
+            return nil
+        }
+    }
+
+    private func exportComposition(_ composition: AVMutableComposition, sourceURL: URL) async -> URL? {
+        let outputURL = sourceURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(sourceURL.deletingPathExtension().lastPathComponent + "-render-offset.mov")
+        try? FileManager.default.removeItem(at: outputURL)
+        guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+            return nil
+        }
+        export.outputURL = outputURL
+        export.outputFileType = .mov
+        export.shouldOptimizeForNetworkUse = false
+        await withCheckedContinuation { continuation in
+            export.exportAsynchronously {
+                continuation.resume()
+            }
+        }
+        return export.status == .completed ? outputURL : nil
     }
 
     nonisolated private static func timestamp() -> String {
