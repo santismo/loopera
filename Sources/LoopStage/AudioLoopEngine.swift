@@ -118,6 +118,13 @@ final class AudioLoopEngine: @unchecked Sendable {
 
     @discardableResult
     func setOutputDevice(uniqueID: String?) -> Bool {
+        lock.lock()
+        let isCapturingLoop = listeningSlot != nil || recordingSlot != nil
+        lock.unlock()
+        guard !isCapturingLoop else {
+            return true
+        }
+
         if selectedOutputDeviceUID == uniqueID {
             return true
         }

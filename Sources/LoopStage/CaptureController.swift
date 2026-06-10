@@ -425,6 +425,9 @@ final class CaptureController: NSObject, ObservableObject {
         outputRouteTask?.cancel()
         status = "Applying loop audio output..."
         outputRouteTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+
             let applied = await Task.detached(priority: .userInitiated) {
                 audioLoopEngine.setOutputDevice(uniqueID: uniqueID)
             }.value
@@ -438,6 +441,12 @@ final class CaptureController: NSObject, ObservableObject {
                 ? "Loop audio output selected."
                 : "Could not apply selected loop audio output."
         }
+    }
+
+    private func cancelPendingOutputRoute() {
+        outputRouteRequestID += 1
+        outputRouteTask?.cancel()
+        outputRouteTask = nil
     }
 
     func applyOffsetProfile(_ profile: OffsetProfile) {
@@ -691,6 +700,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     private func startRecording(slot number: Int, fixedLength: TimeInterval? = nil) {
         guard isConfigured, !isRecording, let slotPosition = slots.firstIndex(where: { $0.index == number }) else { return }
+        cancelPendingOutputRoute()
 
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("Loopera-\(number)-\(UUID().uuidString)")
@@ -731,6 +741,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     private func armSlaveSlot(_ number: Int) {
         guard let slotPosition = slots.firstIndex(where: { $0.index == number }) else { return }
+        cancelPendingOutputRoute()
         guard masterDuration != nil else {
             slots[slotPosition].state = .armed
             status = "Slot \(number) armed. It will start when master exists."
@@ -768,6 +779,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     private func startListening(slot number: Int) {
         guard isConfigured, !isRecording, let slotPosition = slots.firstIndex(where: { $0.index == number }) else { return }
+        cancelPendingOutputRoute()
 
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("Loopera-\(number)-listen-\(UUID().uuidString)")
