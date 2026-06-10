@@ -150,6 +150,16 @@ enum AppWindowSourceStore {
         }
         return brightPixels < 3
     }
+
+    static func capturePixelSize(for window: SCWindow) -> (width: Int, height: Int) {
+        let scale = NSScreen.screens
+            .filter { $0.frame.intersects(window.frame) }
+            .map(\.backingScaleFactor)
+            .max() ?? NSScreen.main?.backingScaleFactor ?? 1
+        let width = max(16, Int((window.frame.width * scale).rounded()))
+        let height = max(16, Int((window.frame.height * scale).rounded()))
+        return (width, height)
+    }
 }
 
 final class AppWindowStreamFrameProvider: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
@@ -224,16 +234,17 @@ final class AppWindowStreamFrameProvider: NSObject, SCStreamOutput, SCStreamDele
                     }
                 }
 
+                let size = AppWindowSourceStore.capturePixelSize(for: window)
                 let config = SCStreamConfiguration()
-                config.width = max(16, Int(window.frame.width.rounded()))
-                config.height = max(16, Int(window.frame.height.rounded()))
+                config.width = size.width
+                config.height = size.height
                 config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
                 config.pixelFormat = kCVPixelFormatType_32BGRA
                 config.scalesToFit = true
                 config.preservesAspectRatio = true
                 config.showsCursor = false
                 config.capturesAudio = false
-                config.queueDepth = 3
+                config.queueDepth = 1
                 config.ignoreShadowsSingleWindow = true
                 config.ignoreGlobalClipSingleWindow = true
                 config.shouldBeOpaque = true
@@ -261,9 +272,10 @@ final class AppWindowStreamFrameProvider: NSObject, SCStreamOutput, SCStreamDele
 
     @available(macOS 14.0, *)
     private func captureInitialImage(for window: SCWindow) async -> CGImage? {
+        let size = AppWindowSourceStore.capturePixelSize(for: window)
         let config = SCStreamConfiguration()
-        config.width = max(16, Int(window.frame.width.rounded()))
-        config.height = max(16, Int(window.frame.height.rounded()))
+        config.width = size.width
+        config.height = size.height
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.scalesToFit = true
         config.preservesAspectRatio = true
@@ -520,7 +532,7 @@ final class AppWindowLoopRecorder: @unchecked Sendable {
 
     private func startTimer() {
         let timer = DispatchSource.makeTimerSource(queue: captureQueue)
-        timer.schedule(deadline: .now(), repeating: 1.0 / Double(Self.targetFrameRate), leeway: .milliseconds(2))
+        timer.schedule(deadline: .now(), repeating: 1.0 / Double(Self.targetFrameRate), leeway: .nanoseconds(0))
         timer.setEventHandler { [weak self] in
             guard let self, self.isRecording else { return }
             guard let image = AppWindowSourceStore.snapshot(windowID: self.windowID) else { return }

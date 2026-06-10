@@ -512,7 +512,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     func setScaleForSelected(_ scale: Double) {
         guard let selectedSlotIndex, let slotPosition = slots.firstIndex(where: { $0.index == selectedSlotIndex }) else { return }
-        slots[slotPosition].scale = scale
+        slots[slotPosition].scale = max(0.25, min(4.0, scale))
     }
 
     func setShapeForSelected(_ shape: LoopSlotShape) {

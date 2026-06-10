@@ -15,6 +15,8 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
     private var didStartSession = false
     private var liveAudioStartPTS: CMTime?
     private var loopAudioStartPTS: CMTime?
+    private var liveAudioStartDelay: TimeInterval = 0
+    private var loopAudioStartDelay: TimeInterval = 0
     private var isFinishing = false
     private var fallbackTimer: DispatchSourceTimer?
     private var fallbackStartTime: Date?
@@ -95,7 +97,7 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
 
     private func startCaptureTimer(source: WindowCaptureSource, startTime: Date, width: Int, height: Int) {
         let timer = DispatchSource.makeTimerSource(queue: captureQueue)
-        timer.schedule(deadline: .now(), repeating: 1.0 / Double(Self.targetFrameRate), leeway: .milliseconds(2))
+        timer.schedule(deadline: .now(), repeating: 1.0 / Double(Self.targetFrameRate), leeway: .nanoseconds(0))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             guard let image = Self.snapshot(source: source) else { return }
@@ -235,6 +237,8 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
             self.didStartSession = false
             self.liveAudioStartPTS = nil
             self.loopAudioStartPTS = nil
+            self.liveAudioStartDelay = 0
+            self.loopAudioStartDelay = 0
             self.isFinishing = false
             self.fallbackStartTime = nil
             self.nextVideoFrameIndex = 0
@@ -258,6 +262,8 @@ final class PerformanceRecorder: NSObject, ObservableObject, @unchecked Sendable
                 self.didStartSession = false
                 self.liveAudioStartPTS = nil
                 self.loopAudioStartPTS = nil
+                self.liveAudioStartDelay = 0
+                self.loopAudioStartDelay = 0
                 self.isFinishing = false
                 self.nextVideoFrameIndex = 0
                 self.acceptingAudio = false
@@ -423,22 +429,28 @@ extension PerformanceRecorder {
         source: AudioSource
     ) {
         guard acceptingAudio, !input.isEmpty, sampleRate > 0 else { return }
+        let arrivalDate = Date()
         sampleQueue.async {
             let audioInput: AVAssetWriterInput?
             let basePTS: CMTime?
+            let startDelay: TimeInterval
             switch source {
             case .live:
                 audioInput = self.liveAudioInput
                 if self.liveAudioStartPTS == nil {
                     self.liveAudioStartPTS = presentationTime
+                    self.liveAudioStartDelay = self.audioDelayFromRecorderStart(arrivalDate: arrivalDate)
                 }
                 basePTS = self.liveAudioStartPTS
+                startDelay = self.liveAudioStartDelay
             case .loop:
                 audioInput = self.loopAudioInput
                 if self.loopAudioStartPTS == nil {
                     self.loopAudioStartPTS = presentationTime
+                    self.loopAudioStartDelay = self.audioDelayFromRecorderStart(arrivalDate: arrivalDate)
                 }
                 basePTS = self.loopAudioStartPTS
+                startDelay = self.loopAudioStartDelay
             }
             guard let audioInput, audioInput.isReadyForMoreMediaData, let basePTS else { return }
 
@@ -449,14 +461,24 @@ extension PerformanceRecorder {
 
             let relativePTS = CMTimeSubtract(presentationTime, basePTS)
             guard relativePTS.isValid, relativePTS.seconds.isFinite else { return }
+            let delayedPTS = CMTimeAdd(
+                relativePTS,
+                CMTime(seconds: max(0, startDelay), preferredTimescale: CMTimeScale(sampleRate.rounded()))
+            )
 
             guard let sampleBuffer = Self.makeStereoSampleBuffer(
                 input: input,
                 sampleRate: sampleRate,
-                presentationTime: relativePTS
+                presentationTime: delayedPTS
             ) else { return }
             audioInput.append(sampleBuffer)
         }
+    }
+
+    private func audioDelayFromRecorderStart(arrivalDate: Date) -> TimeInterval {
+        guard let fallbackStartTime else { return 0 }
+        let delay = arrivalDate.timeIntervalSince(fallbackStartTime)
+        return delay.isFinite ? max(0, delay) : 0
     }
 
     private static func makeStereoSampleBuffer(

@@ -708,7 +708,7 @@ struct StageView: View {
                     get: { selectedScale },
                     set: { capture.setScaleForSelected($0) }
                 ),
-                range: 0.5...2.2
+                range: 0.5...4.0
             )
         }
         .font(.system(size: 12, weight: .medium))

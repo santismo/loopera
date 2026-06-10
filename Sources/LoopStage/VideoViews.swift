@@ -148,14 +148,14 @@ struct LoopPlayerView: NSViewRepresentable {
                 let player = AVPlayer(playerItem: item)
                 player.actionAtItemEnd = .none
                 player.automaticallyWaitsToMinimizeStalling = false
-                let start = CMTime(seconds: startOffset, preferredTimescale: 600)
+                let start = CMTime(seconds: startOffset, preferredTimescale: 6000)
                 item.forwardPlaybackEndTime = duration > 0
-                    ? CMTimeAdd(start, CMTime(seconds: duration, preferredTimescale: 600))
+                    ? CMTimeAdd(start, CMTime(seconds: duration, preferredTimescale: 6000))
                     : .invalid
                 self.player = player
                 playerLayer = layer
                 layer.player = player
-                layer.videoGravity = .resizeAspectFill
+                layer.videoGravity = .resizeAspect
                 layer.opacity = 0
                 let initialSeconds = targetVideoSeconds(
                     syncTime: syncTime,
@@ -163,7 +163,7 @@ struct LoopPlayerView: NSViewRepresentable {
                     duration: duration,
                     videoSyncOffset: videoSyncOffset
                 )
-                let initialTime = CMTimeAdd(start, CMTime(seconds: max(0, initialSeconds), preferredTimescale: 600))
+                let initialTime = CMTimeAdd(start, CMTime(seconds: max(0, initialSeconds), preferredTimescale: 6000))
                 player.seek(to: initialTime, toleranceBefore: .zero, toleranceAfter: .zero)
             }
 
@@ -204,7 +204,7 @@ struct LoopPlayerView: NSViewRepresentable {
             let targetSeconds = targetVideoSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration, videoSyncOffset: videoSyncOffset)
             guard targetSeconds.isFinite, targetSeconds >= 0 else { return }
             let crossedBoundary = didAudioPhaseWrap(targetSeconds: targetSeconds, duration: duration)
-            if !force, !crossedBoundary, targetSeconds >= 0.025, Date().timeIntervalSince(lastSyncCorrection) < 0.35 {
+            if !force, !crossedBoundary, targetSeconds >= 0.025, Date().timeIntervalSince(lastSyncCorrection) < 0.12 {
                 return
             }
             let currentSeconds = max(0, player.currentTime().seconds - startOffset)
@@ -218,15 +218,15 @@ struct LoopPlayerView: NSViewRepresentable {
             } else {
                 wrappedDelta = rawDelta
             }
-            guard force || crossedBoundary || targetSeconds < 0.025 || abs(wrappedDelta) > 0.06 else { return }
+            guard force || crossedBoundary || targetSeconds < 0.025 || abs(wrappedDelta) > 0.025 else { return }
 
             let target = CMTimeAdd(
-                CMTime(seconds: startOffset, preferredTimescale: 600),
-                CMTime(seconds: crossedBoundary ? 0 : max(0, targetSeconds), preferredTimescale: 600)
+                CMTime(seconds: startOffset, preferredTimescale: 6000),
+                CMTime(seconds: crossedBoundary ? 0 : max(0, targetSeconds), preferredTimescale: 6000)
             )
             let tolerance = crossedBoundary || force || targetSeconds < 0.025
                 ? CMTime.zero
-                : CMTime(seconds: 1.0 / 60.0, preferredTimescale: 600)
+                : CMTime(seconds: 1.0 / 120.0, preferredTimescale: 6000)
             player.seek(to: target, toleranceBefore: tolerance, toleranceAfter: tolerance)
             lastSyncCorrection = Date()
         }
@@ -258,7 +258,7 @@ struct LoopPlayerView: NSViewRepresentable {
                 animateOpacity(of: playerLayer, to: 0, duration: fadeDuration)
             }
 
-            let startTime = CMTime(seconds: startOffset, preferredTimescale: 600)
+            let startTime = CMTime(seconds: startOffset, preferredTimescale: 6000)
             DispatchQueue.main.asyncAfter(deadline: .now() + fadeDuration) { [weak self, weak player] in
                 guard let self, let player, self.isFadingOut else { return }
                 player.pause()
@@ -334,7 +334,7 @@ final class PlayerHostView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.masksToBounds = true
-        playerLayer.videoGravity = .resizeAspectFill
+        playerLayer.videoGravity = .resizeAspect
         layer?.addSublayer(playerLayer)
     }
 
@@ -342,7 +342,7 @@ final class PlayerHostView: NSView {
         super.init(coder: coder)
         wantsLayer = true
         layer?.masksToBounds = true
-        playerLayer.videoGravity = .resizeAspectFill
+        playerLayer.videoGravity = .resizeAspect
         layer?.addSublayer(playerLayer)
     }
 
