@@ -1,5 +1,6 @@
 import AppKit
 @preconcurrency import AVFoundation
+@preconcurrency import ScreenCaptureKit
 import SwiftUI
 
 enum VideoInputMode: String, CaseIterable, Identifiable, Codable {
@@ -69,6 +70,10 @@ enum AppWindowSourceStore {
     }
 
     static func snapshot(windowID: CGWindowID) -> CGImage? {
+        if let screenCaptureImage = screenCaptureKitSnapshot(windowID: windowID) {
+            return screenCaptureImage
+        }
+
         let direct = CGWindowListCreateImage(
             .null,
             .optionIncludingWindow,
@@ -79,6 +84,51 @@ enum AppWindowSourceStore {
             return direct
         }
         return visibleDisplaySnapshot(windowID: windowID) ?? direct
+    }
+
+    private static func screenCaptureKitSnapshot(windowID: CGWindowID) -> CGImage? {
+        guard #available(macOS 14.0, *) else { return nil }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var capturedImage: CGImage?
+
+        Task {
+            do {
+                let content = try await SCShareableContent.current
+                guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+                    semaphore.signal()
+                    return
+                }
+
+                let config = SCStreamConfiguration()
+                let width = max(16, Int(window.frame.width.rounded()))
+                let height = max(16, Int(window.frame.height.rounded()))
+                config.width = width
+                config.height = height
+                config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+                config.pixelFormat = kCVPixelFormatType_32BGRA
+                config.scalesToFit = true
+                config.preservesAspectRatio = true
+                config.showsCursor = false
+                config.capturesAudio = false
+                config.ignoreShadowsSingleWindow = true
+                config.ignoreGlobalClipSingleWindow = true
+                config.shouldBeOpaque = true
+
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, _ in
+                    if let image, !isEffectivelyBlack(image) {
+                        capturedImage = image
+                    }
+                    semaphore.signal()
+                }
+            } catch {
+                semaphore.signal()
+            }
+        }
+
+        _ = semaphore.wait(timeout: .now() + .milliseconds(180))
+        return capturedImage
     }
 
     private static func visibleDisplaySnapshot(windowID: CGWindowID) -> CGImage? {
@@ -188,12 +238,12 @@ struct AppWindowPreview: NSViewRepresentable {
             view.imageLayer.contents = nil
 
             guard windowID != nil else { return }
-            timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     self?.refresh()
                 }
             }
-            timer?.tolerance = 0.01
+            timer?.tolerance = 0.004
             refresh()
         }
 
