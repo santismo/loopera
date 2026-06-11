@@ -13,7 +13,8 @@ struct StageView: View {
     @StateObject private var playbackClock = LoopPlaybackClock()
     @StateObject private var metronome = MetronomeController()
     @State private var layout: StageLayout = .clock
-    @State private var canvasMode: StageCanvasMode = .landscape
+    @AppStorage("Loopera.stageCanvasMode") private var canvasModeRaw = StageCanvasMode.landscape.rawValue
+    @AppStorage("Loopera.showTimeline") private var showTimeline = true
     @State private var editMode = false
     @State private var canvasScale = 1.0
     @State private var livePreviewZoom = 1.0
@@ -33,102 +34,7 @@ struct StageView: View {
     @FocusState private var focusedField: StageFocusedField?
 
     var body: some View {
-        VStack(spacing: 0) {
-            toolbar
-                .id(toolbarResetID)
-
-            GeometryReader { proxy in
-                let canvasSize = stageCanvasSize(in: proxy.size)
-                let offsetPanelSize = CGSize(width: min(560, max(340, proxy.size.width - 24)), height: 335)
-                let editPanelSize = CGSize(
-                    width: min(370, max(300, proxy.size.width - 24)),
-                    height: min(270, max(220, proxy.size.height - 24))
-                )
-                ZStack {
-                    Color(red: 0.045, green: 0.048, blue: 0.052)
-
-                    ZStack {
-                        Color(red: 0.045, green: 0.048, blue: 0.052)
-
-                        livePreview(in: canvasSize)
-
-                        loopLayer(in: canvasSize)
-
-                        StageCaptureView { view in
-                            if stageCaptureView !== view {
-                                stageCaptureView = view
-                            }
-                        }
-                        .allowsHitTesting(false)
-                    }
-                    .frame(width: canvasSize.width, height: canvasSize.height)
-                    .clipShape(Rectangle())
-                    .overlay {
-                        Rectangle()
-                            .stroke(.white.opacity(editMode ? 0.24 : 0.08), lineWidth: 1)
-                    }
-                    .coordinateSpace(name: "stage")
-
-                    if editMode {
-                        editControlsOverlay
-                            .frame(width: editPanelSize.width, alignment: .topLeading)
-                            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .position(
-                                panelCenter(
-                                    panelSize: editPanelSize,
-                                    in: proxy.size,
-                                    anchor: CGPoint(x: 12, y: 12),
-                                    offset: CGSize(
-                                        width: editPanelOffset.width + editPanelDrag.width,
-                                        height: editPanelOffset.height + editPanelDrag.height
-                                    )
-                                )
-                            )
-                            .zIndex(10)
-                    }
-
-                    if showOffsetSettings {
-                        OffsetSettingsView(
-                            profile: $offsetDraft,
-                            apply: { profile in
-                                capture.applyOffsetProfile(profile)
-                            },
-                            save: { profile in
-                                capture.saveOffsetProfile(profile)
-                            },
-                            close: {
-                                closeOffsetSettings()
-                            },
-                            panelWidth: offsetPanelSize.width
-                        )
-                        .id(offsetMenuID)
-                        .frame(width: offsetPanelSize.width, height: offsetPanelSize.height, alignment: .topLeading)
-                        .contentShape(Rectangle())
-                        .position(
-                            panelCenter(
-                                panelSize: offsetPanelSize,
-                                in: proxy.size,
-                                anchor: CGPoint(
-                                    x: canvasMode == .portrait ? 12 : max(12, proxy.size.width - offsetPanelSize.width - 12),
-                                    y: 12
-                                ),
-                                offset: .zero
-                            )
-                        )
-                        .zIndex(11)
-                    }
-                }
-                .clipped()
-            }
-
-            AudioTimelineView(
-                slots: capture.slots,
-                waveforms: capture.waveformSnapshots,
-                playbackTimes: capture.loopPlaybackTimes,
-                playbackTimeUpdatedAt: capture.loopPlaybackTimeUpdatedAt
-            )
-            .frame(height: 148)
-        }
+        rootLayout
         .background(Color(red: 0.10, green: 0.105, blue: 0.11))
         .background(KeyEventMonitor { event in
             handleEvent(event)
@@ -168,13 +74,43 @@ struct StageView: View {
             capture.status = isEditing ? "Edit mode: drag slot rings and resize selected loop." : "Edit mode off."
         }
         .onChange(of: canvasMode) { _, mode in
-            capture.status = "Canvas set to \(mode.rawValue). Use Update to save this layout."
+            capture.status = "Canvas set to \(mode.rawValue)."
         }
         .onChange(of: livePreviewZoom) { _, zoom in
             capture.setLivePreviewZoom(zoom)
         }
         .onDisappear {
             shutdownAudioAndCapture()
+        }
+    }
+
+    @ViewBuilder
+    private var rootLayout: some View {
+        if canvasMode == .portrait {
+            HStack(spacing: 0) {
+                ScrollView(.vertical, showsIndicators: false) {
+                    portraitToolbar
+                        .id(toolbarResetID)
+                }
+                .frame(width: 318)
+                .background(.black.opacity(0.88))
+
+                VStack(spacing: 0) {
+                    stageViewport
+                    if showTimeline {
+                        timelineView
+                    }
+                }
+            }
+        } else {
+            VStack(spacing: 0) {
+                toolbar
+                    .id(toolbarResetID)
+                stageViewport
+                if showTimeline {
+                    timelineView
+                }
+            }
         }
     }
 
@@ -187,6 +123,116 @@ struct StageView: View {
             Task {
                 await performance.stop()
             }
+        }
+    }
+
+    private var canvasMode: StageCanvasMode {
+        StageCanvasMode(rawValue: canvasModeRaw) ?? .landscape
+    }
+
+    private var canvasModeBinding: Binding<StageCanvasMode> {
+        Binding(
+            get: { canvasMode },
+            set: { mode in
+                canvasModeRaw = mode.rawValue
+                capture.status = "Canvas set to \(mode.rawValue)."
+            }
+        )
+    }
+
+    private var timelineView: some View {
+        AudioTimelineView(
+            slots: capture.slots,
+            waveforms: capture.waveformSnapshots,
+            playbackTimes: capture.loopPlaybackTimes,
+            playbackTimeUpdatedAt: capture.loopPlaybackTimeUpdatedAt
+        )
+        .frame(height: 148)
+    }
+
+    private var stageViewport: some View {
+        GeometryReader { proxy in
+            let canvasSize = stageCanvasSize(in: proxy.size)
+            let offsetPanelSize = CGSize(width: min(560, max(340, proxy.size.width - 24)), height: 335)
+            let editPanelSize = CGSize(
+                width: min(370, max(300, proxy.size.width - 24)),
+                height: min(270, max(220, proxy.size.height - 24))
+            )
+            ZStack {
+                Color(red: 0.045, green: 0.048, blue: 0.052)
+
+                ZStack {
+                    Color(red: 0.045, green: 0.048, blue: 0.052)
+
+                    livePreview(in: canvasSize)
+
+                    loopLayer(in: canvasSize)
+
+                    StageCaptureView { view in
+                        if stageCaptureView !== view {
+                            stageCaptureView = view
+                        }
+                    }
+                    .allowsHitTesting(false)
+                }
+                .frame(width: canvasSize.width, height: canvasSize.height)
+                .clipShape(Rectangle())
+                .overlay {
+                    Rectangle()
+                        .stroke(.white.opacity(editMode ? 0.24 : 0.08), lineWidth: 1)
+                }
+                .coordinateSpace(name: "stage")
+
+                if editMode {
+                    editControlsOverlay
+                        .frame(width: editPanelSize.width, alignment: .topLeading)
+                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .position(
+                            panelCenter(
+                                panelSize: editPanelSize,
+                                in: proxy.size,
+                                anchor: CGPoint(x: 12, y: 12),
+                                offset: CGSize(
+                                    width: editPanelOffset.width + editPanelDrag.width,
+                                    height: editPanelOffset.height + editPanelDrag.height
+                                )
+                            )
+                        )
+                        .zIndex(10)
+                }
+
+                if showOffsetSettings {
+                    OffsetSettingsView(
+                        profile: $offsetDraft,
+                        apply: { profile in
+                            capture.applyOffsetProfile(profile)
+                        },
+                        save: { profile in
+                            capture.saveOffsetProfile(profile)
+                        },
+                        close: {
+                            closeOffsetSettings()
+                        },
+                        panelWidth: offsetPanelSize.width
+                    )
+                    .id(offsetMenuID)
+                    .frame(width: offsetPanelSize.width, height: offsetPanelSize.height, alignment: .topLeading)
+                    .contentShape(Rectangle())
+                    .position(
+                        panelCenter(
+                            panelSize: offsetPanelSize,
+                            in: proxy.size,
+                            anchor: CGPoint(
+                                x: canvasMode == .portrait ? 12 : max(12, proxy.size.width - offsetPanelSize.width - 12),
+                                y: 12
+                            ),
+                            offset: .zero
+                        )
+                    )
+                    .zIndex(11)
+                }
+            }
+            .clipped()
         }
     }
 
@@ -265,6 +311,7 @@ struct StageView: View {
                 .frame(width: 180)
 
                 layoutPresetControls
+                canvasDisplayControls
 
                 Button {
                     toggleWindowMode()
@@ -414,6 +461,86 @@ struct StageView: View {
         .background(.black.opacity(0.86))
     }
 
+    private var portraitToolbar: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 8) {
+                Text("🎥")
+                    .font(.system(size: 22))
+                    .frame(width: 30)
+
+                Button {
+                    capture.refreshDevices()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh camera and audio inputs")
+
+                Button {
+                    toggleWindowMode()
+                } label: {
+                    Image(systemName: "rectangle.on.rectangle")
+                }
+                .help("Toggle fullscreen/window mode")
+
+                Button {
+                    capture.toggleAllPlayback()
+                } label: {
+                    Image(systemName: allLoopsArePlaying ? "pause.fill" : "play.fill")
+                }
+                .help("Play or stop all loops")
+                .keyboardShortcut(.space, modifiers: [.shift])
+            }
+
+            canvasDisplayControls
+
+            VStack(alignment: .leading, spacing: 7) {
+                videoSourceControls
+            }
+
+            HStack(spacing: 8) {
+                audioInputMenu
+                audioPairMenu
+            }
+
+            audioOutputMenu
+
+            layoutPresetControls
+
+            meter
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            thresholdControl
+
+            portraitMetronomeControls
+
+            HStack(spacing: 8) {
+                offsetButton
+                editButton
+                clearButton
+            }
+
+            HStack(spacing: 8) {
+                performanceButton
+                performanceFolderButton
+            }
+
+            masterProgressBar
+            slotStatusStrip
+                .frame(height: 28)
+            masterVolumeControl
+
+            Text(statusText)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.66))
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
+    }
+
     private var meter: some View {
         VStack(alignment: .leading, spacing: 3) {
             ZStack(alignment: .leading) {
@@ -437,6 +564,276 @@ struct StageView: View {
             .foregroundStyle(.white.opacity(0.65))
         }
         .frame(width: 150)
+    }
+
+    private var audioInputMenu: some View {
+        Menu {
+            ForEach(capture.audioDevices, id: \.uniqueID) { device in
+                Toggle(device.localizedName, isOn: Binding(
+                    get: { capture.selectedAudioDeviceIDs.contains(device.uniqueID) },
+                    set: { capture.setAudioDevice(device.uniqueID, enabled: $0) }
+                ))
+            }
+        } label: {
+            Label(audioMenuTitle, systemImage: "waveform")
+        }
+        .frame(width: 180)
+    }
+
+    private var audioPairMenu: some View {
+        Menu {
+            ForEach(capture.audioChannelPairStarts, id: \.self) { start in
+                Button {
+                    capture.selectAudioChannelPair(start: start)
+                } label: {
+                    if capture.selectedAudioChannelPairStart == start {
+                        Label(audioPairTitle(start), systemImage: "checkmark")
+                    } else {
+                        Text(audioPairTitle(start))
+                    }
+                }
+            }
+        } label: {
+            Label(audioPairTitle(capture.selectedAudioChannelPairStart), systemImage: "cable.connector")
+        }
+        .frame(width: 118)
+    }
+
+    private var audioOutputMenu: some View {
+        Menu {
+            Button("System Output") {
+                output.selectSystemOutput()
+                capture.setAudioOutputDevice(nil)
+            }
+            Divider()
+            ForEach(output.devices) { device in
+                Button {
+                    output.select(device.id)
+                    capture.setAudioOutputDevice(device.id)
+                } label: {
+                    if output.selectedDeviceID == device.id {
+                        Label(device.name, systemImage: "checkmark")
+                    } else {
+                        Text(device.name)
+                    }
+                }
+            }
+            Divider()
+            Button {
+                output.refresh()
+            } label: {
+                Label("Refresh Outputs", systemImage: "arrow.clockwise")
+            }
+        } label: {
+            Label(audioOutputMenuTitle, systemImage: "speaker.wave.2")
+        }
+        .frame(width: 180)
+    }
+
+    private var thresholdControl: some View {
+        HStack(spacing: 7) {
+            Text("Thr")
+                .font(.system(size: 11, weight: .medium))
+            Slider(value: $capture.threshold, in: 0.0005...0.2)
+                .frame(width: 120)
+        }
+    }
+
+    private var metronomeControls: some View {
+        HStack(spacing: 7) {
+            Text("BPM")
+                .font(.system(size: 11, weight: .medium))
+            TextField("BPM", value: $metronome.bpm, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .focused($focusedField, equals: .tempo)
+                .frame(width: 54)
+                .onSubmit {
+                    metronome.applyTempo()
+                    if metronome.isPlaying {
+                        capture.tempoBPM = metronome.bpm
+                        capture.setMetronomeGrid(bpm: metronome.bpm, startDate: metronome.startedAt)
+                    }
+                }
+            Slider(value: $metronome.bpm, in: 20...300)
+                .frame(width: 92)
+                .onChange(of: metronome.bpm) {
+                    metronome.applyTempo()
+                    if metronome.isPlaying {
+                        capture.tempoBPM = metronome.bpm
+                        capture.setMetronomeGrid(bpm: metronome.bpm, startDate: metronome.startedAt)
+                    }
+                }
+                .help("Metronome tempo")
+            Button {
+                setMetronomePlaying(!metronome.isPlaying)
+            } label: {
+                Image(systemName: metronome.isPlaying ? "stop.fill" : "play.fill")
+            }
+            .help("Play metronome")
+            Button {
+                metronome.toggleMute()
+            } label: {
+                Image(systemName: metronome.isMuted ? "speaker.slash" : "speaker.wave.2")
+            }
+            .help("Mute metronome (K)")
+            Slider(value: $metronome.volume, in: 0...1)
+                .frame(width: 64)
+                .onChange(of: metronome.volume) {
+                    metronome.applyVolume()
+                }
+                .help("Metronome volume")
+            Button {
+                capture.detectTempoFromMaster()
+                if let tempo = capture.tempoBPM {
+                    metronome.bpm = tempo
+                    metronome.applyTempo()
+                }
+            } label: {
+                Image(systemName: "metronome")
+            }
+            .help("Detect tempo from master loop")
+        }
+    }
+
+    private var portraitMetronomeControls: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                Text("BPM")
+                    .font(.system(size: 11, weight: .medium))
+                TextField("BPM", value: $metronome.bpm, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focusedField, equals: .tempo)
+                    .frame(width: 54)
+                    .onSubmit {
+                        metronome.applyTempo()
+                        if metronome.isPlaying {
+                            capture.tempoBPM = metronome.bpm
+                            capture.setMetronomeGrid(bpm: metronome.bpm, startDate: metronome.startedAt)
+                        }
+                    }
+                Slider(value: $metronome.bpm, in: 20...300)
+                    .frame(width: 150)
+                    .onChange(of: metronome.bpm) {
+                        metronome.applyTempo()
+                        if metronome.isPlaying {
+                            capture.tempoBPM = metronome.bpm
+                            capture.setMetronomeGrid(bpm: metronome.bpm, startDate: metronome.startedAt)
+                        }
+                    }
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    setMetronomePlaying(!metronome.isPlaying)
+                } label: {
+                    Image(systemName: metronome.isPlaying ? "stop.fill" : "play.fill")
+                }
+                .help("Play metronome")
+
+                Button {
+                    metronome.toggleMute()
+                } label: {
+                    Image(systemName: metronome.isMuted ? "speaker.slash" : "speaker.wave.2")
+                }
+                .help("Mute metronome (K)")
+
+                Slider(value: $metronome.volume, in: 0...1)
+                    .frame(width: 108)
+                    .onChange(of: metronome.volume) {
+                        metronome.applyVolume()
+                    }
+                    .help("Metronome volume")
+
+                Button {
+                    capture.detectTempoFromMaster()
+                    if let tempo = capture.tempoBPM {
+                        metronome.bpm = tempo
+                        metronome.applyTempo()
+                    }
+                } label: {
+                    Image(systemName: "metronome")
+                }
+                .help("Detect tempo from master loop")
+            }
+        }
+    }
+
+    private var canvasDisplayControls: some View {
+        HStack(spacing: 8) {
+            Picker("Canvas", selection: canvasModeBinding) {
+                ForEach(StageCanvasMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 170)
+            .help("Stage canvas orientation")
+
+            Button {
+                showTimeline.toggle()
+            } label: {
+                Label(showTimeline ? "Timeline" : "Timeline", systemImage: showTimeline ? "waveform.path.ecg.rectangle" : "rectangle")
+            }
+            .help(showTimeline ? "Hide timeline" : "Show timeline")
+        }
+    }
+
+    private var offsetButton: some View {
+        Button {
+            openOffsetSettings()
+        } label: {
+            Label("Offset", systemImage: "slider.horizontal.2.square")
+        }
+        .help("Audio/video offset and fade settings")
+    }
+
+    private var editButton: some View {
+        Button {
+            toggleEditMode()
+        } label: {
+            Label("Edit", systemImage: "slider.horizontal.3")
+        }
+        .buttonStyle(.bordered)
+        .foregroundStyle(editMode ? .black : .white)
+        .background(editMode ? Color.white.opacity(0.78) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private var clearButton: some View {
+        Button {
+            capture.clearLoops()
+        } label: {
+            Label("Clear", systemImage: "trash")
+        }
+    }
+
+    private var performanceButton: some View {
+        Button {
+            if performance.isRecording {
+                capture.setPerformanceLoopAudioHandler(nil)
+                Task { await performance.stop() }
+            } else {
+                capture.setPerformanceLoopAudioHandler { input, sampleRate, presentationTime in
+                    performance.appendLoopAudio(input: input, sampleRate: sampleRate, presentationTime: presentationTime)
+                }
+                performance.start(microphoneDeviceID: capture.selectedAudioDeviceIDs.first, fallbackView: stageCaptureView)
+                if !performance.isRecording {
+                    capture.setPerformanceLoopAudioHandler(nil)
+                }
+            }
+        } label: {
+            Label(performance.isRecording ? "Stop Performance" : "Record Performance", systemImage: "rectangle.dashed.badge.record")
+        }
+    }
+
+    private var performanceFolderButton: some View {
+        Button {
+            openPerformanceFolder()
+        } label: {
+            Image(systemName: "folder")
+        }
+        .help("Show saved performances")
     }
 
     @ViewBuilder
@@ -703,14 +1100,6 @@ struct StageView: View {
                 shapeMenu(title: "Live", selection: $livePreviewShape)
             }
 
-            Picker("Canvas", selection: $canvasMode) {
-                ForEach(StageCanvasMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .help("Fixed video canvas aspect")
-
             compactSlider("Live Size", value: $canvasScale, range: 0.65...1.35)
             compactSlider("Live Zoom", value: $livePreviewZoom, range: 1...2.5)
             compactSlider(
@@ -735,6 +1124,15 @@ struct StageView: View {
 
     private func stageCanvasSize(in available: CGSize) -> CGSize {
         let aspect = CGFloat(canvasMode.aspectRatio)
+        if canvasMode == .portrait {
+            let height = available.height
+            let width = height * aspect
+            if width <= available.width {
+                return CGSize(width: width, height: height)
+            }
+            let fittedWidth = available.width
+            return CGSize(width: fittedWidth, height: fittedWidth / aspect)
+        }
         let availableAspect = max(0.01, available.width / max(1, available.height))
         if availableAspect > aspect {
             let height = available.height
@@ -873,7 +1271,7 @@ struct StageView: View {
             selectedAudioChannelPairStart: capture.selectedAudioChannelPairStart,
             selectedAudioOutputDeviceID: output.selectedDeviceID,
             stageLayout: layout,
-            canvasMode: canvasMode,
+            canvasMode: nil,
             canvasScale: canvasScale,
             livePreviewZoom: livePreviewZoom,
             livePreviewShape: livePreviewShape,
@@ -903,7 +1301,6 @@ struct StageView: View {
             activeLayoutName = name
             layout = preset.stageLayout
             capture.selectVideoInputMode(preset.videoInputMode ?? .camera)
-            canvasMode = preset.canvasMode ?? .landscape
             canvasScale = preset.canvasScale
             livePreviewZoom = preset.livePreviewZoom ?? 1
             livePreviewShape = preset.livePreviewShape ?? .roundedSquare
