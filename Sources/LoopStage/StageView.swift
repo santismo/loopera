@@ -1402,7 +1402,7 @@ struct StageView: View {
                     .foregroundStyle(.white.opacity(0.55))
             }
             if hasMaster {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { _ in
+                TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { _ in
                     GeometryReader { proxy in
                         let phase = masterProgressPhase(
                             syncTime: syncTime,
@@ -1895,7 +1895,7 @@ private struct LoopTile: View {
     }
 
     private var progressDot: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { _ in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { _ in
             GeometryReader { proxy in
                 if slot.duration > 0, slot.isPlaying {
                     let interpolatedTime = syncTime + Date().timeIntervalSince(syncTimeUpdatedAt)
@@ -2099,7 +2099,7 @@ private struct AudioTimelineView: View {
                             .foregroundStyle(.white.opacity(0.38))
                     }
             } else {
-                TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { context in
+                TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { context in
                     ScrollView(.vertical, showsIndicators: false) {
                         VStack(spacing: 5) {
                             ForEach(visibleSlots) { slot in

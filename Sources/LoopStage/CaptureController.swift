@@ -74,6 +74,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var previousMasterPhase: Double?
     private var previousStoppingPhases: [Int: Double] = [:]
     private var lastPlaybackPublishDate = Date.distantPast
+    private var lastWaveformPublishDate = Date.distantPast
     private var lastMeterPublishDate = Date.distantPast
     private var metronomeGridStartDate: Date?
     nonisolated(unsafe) var performanceAudioHandler: ((AudioLoopEngine.InputBuffer, Double, CMTime) -> Void)?
@@ -726,7 +727,7 @@ final class CaptureController: NSObject, ObservableObject {
         slots[slotPosition].state = .recording
         isRecording = true
         audioLoopEngine.beginRecording(slot: number, usePreBuffer: false)
-        _ = startLoopVideoRecording(to: outputURL, slot: number)
+        scheduleLoopVideoRecording(to: outputURL, slot: number)
         status = "Recording slot \(number)..."
 
         stopTask?.cancel()
@@ -771,7 +772,7 @@ final class CaptureController: NSObject, ObservableObject {
         recordingSlotIndex = number
         slots[slotPosition].state = .armed
         isRecording = true
-        _ = startLoopVideoRecording(to: outputURL, slot: number)
+        scheduleLoopVideoRecording(to: outputURL, slot: number)
         status = "Slot \(number) armed for the next master start."
     }
 
@@ -796,7 +797,7 @@ final class CaptureController: NSObject, ObservableObject {
         slots[slotPosition].state = .listening
         isRecording = true
         audioLoopEngine.armThreshold(slot: number, preBufferMilliseconds: thresholdLeadMilliseconds)
-        _ = startLoopVideoRecording(to: outputURL, slot: number)
+        scheduleLoopVideoRecording(to: outputURL, slot: number)
         status = "Slot 1 listening for threshold."
     }
 
@@ -980,6 +981,30 @@ final class CaptureController: NSObject, ObservableObject {
                 activeVideoRecordingMode = nil
                 status = "Window video failed: \(error.localizedDescription)"
                 return false
+            }
+        }
+    }
+
+    private func scheduleLoopVideoRecording(to outputURL: URL, slot: Int) {
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self else { return }
+            let audioAlreadyCompleted = self.completedAudioDurations[slot] != nil
+            guard self.recordingSlotIndex == slot || audioAlreadyCompleted
+            else { return }
+            let started = self.startLoopVideoRecording(to: outputURL, slot: slot)
+            if started, audioAlreadyCompleted {
+                if self.movieOutput.isRecording {
+                    self.movieOutput.stopRecording()
+                } else if self.activeVideoRecordingMode == .camera {
+                    self.pendingMovieStopAfterStart = true
+                } else if self.activeVideoRecordingMode == .appWindow {
+                    self.appWindowLoopRecorder.stop { [weak self] url, error in
+                        Task { @MainActor in
+                            await self?.handleLoopVideoFinished(outputFileURL: url, error: error)
+                        }
+                    }
+                }
             }
         }
     }
@@ -1218,7 +1243,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     private func updateLoopPlaybackTimesIfNeeded(force: Bool = false) {
         let now = Date()
-        guard force || now.timeIntervalSince(lastPlaybackPublishDate) >= 1.0 / 30.0 else { return }
+        guard force || now.timeIntervalSince(lastPlaybackPublishDate) >= 1.0 / 60.0 else { return }
         lastPlaybackPublishDate = now
         var times: [Int: TimeInterval] = [:]
         for slot in slots where slot.state == .recorded && slot.duration > 0 {
@@ -1228,7 +1253,10 @@ final class CaptureController: NSObject, ObservableObject {
         }
         loopPlaybackTimes = times
         loopPlaybackTimeUpdatedAt = now
-        waveformSnapshots = audioLoopEngine.waveformSnapshots()
+        if force || now.timeIntervalSince(lastWaveformPublishDate) >= 1.0 / 30.0 {
+            lastWaveformPublishDate = now
+            waveformSnapshots = audioLoopEngine.waveformSnapshots()
+        }
     }
 
     private func finishStoppingLoopsAtBoundary() {
