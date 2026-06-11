@@ -703,6 +703,7 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStartDate = thresholdDate
         pendingStartTrimSeconds = metronomeStartTrimSeconds(thresholdDate: thresholdDate)
         slots[masterPosition].state = .recording
+        updateWaveformsIfNeeded(force: true)
         status = "Recording slot 1..."
     }
 
@@ -990,7 +991,10 @@ final class CaptureController: NSObject, ObservableObject {
             await Task.yield()
             guard let self else { return }
             let audioAlreadyCompleted = self.completedAudioDurations[slot] != nil
-            guard self.recordingSlotIndex == slot || audioAlreadyCompleted
+            let slotStillActive = self.slots.contains { candidate in
+                candidate.index == slot && candidate.state != .empty
+            }
+            guard slotStillActive || audioAlreadyCompleted
             else { return }
             let started = self.startLoopVideoRecording(to: outputURL, slot: slot)
             if started, audioAlreadyCompleted {
@@ -1257,6 +1261,13 @@ final class CaptureController: NSObject, ObservableObject {
             lastWaveformPublishDate = now
             waveformSnapshots = audioLoopEngine.waveformSnapshots()
         }
+    }
+
+    private func updateWaveformsIfNeeded(force: Bool = false) {
+        let now = Date()
+        guard force || now.timeIntervalSince(lastWaveformPublishDate) >= 1.0 / 30.0 else { return }
+        lastWaveformPublishDate = now
+        waveformSnapshots = audioLoopEngine.waveformSnapshots()
     }
 
     private func finishStoppingLoopsAtBoundary() {
@@ -1623,6 +1634,9 @@ extension CaptureController: AVCaptureAudioDataOutputSampleBufferDelegate {
             lastMeterPublishDateForCapture = now
             Task { @MainActor in
                 updateInputMeter(rms: analysis.rms, peak: analysis.peak, presentationTime: pts)
+                if isRecording {
+                    updateWaveformsIfNeeded()
+                }
             }
         }
     }
