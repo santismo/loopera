@@ -1833,21 +1833,24 @@ private struct LoopTile: View {
     var body: some View {
         ZStack {
             if let url = slot.url, slot.state == .recorded, !editMode {
-                LoopPlayerView(
-                    url: url,
-                    slotID: slot.id,
-                    startOffset: effectiveVideoStartOffset,
-                    duration: slot.duration,
-                    isMuted: true,
-                    isPlaying: slot.isPlaying,
-                    isStopping: slot.isStopping,
-                    audioOutputDeviceID: audioOutputDeviceID,
-                    videoZoom: effectiveLoopVideoZoom,
-                    videoSyncOffset: offsetProfile.videoStartOffsetMilliseconds / 1000,
-                    playbackClock: playbackClock,
-                    syncTime: syncTime,
-                    syncTimeUpdatedAt: syncTimeUpdatedAt
-                )
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+                    LoopPlayerView(
+                        url: url,
+                        slotID: slot.id,
+                        startOffset: effectiveVideoStartOffset,
+                        duration: slot.duration,
+                        isMuted: true,
+                        isPlaying: slot.isPlaying,
+                        isStopping: slot.isStopping,
+                        audioOutputDeviceID: audioOutputDeviceID,
+                        videoZoom: effectiveLoopVideoZoom,
+                        videoSyncOffset: offsetProfile.videoStartOffsetMilliseconds / 1000,
+                        playbackClock: playbackClock,
+                        syncTime: syncTime,
+                        syncTimeUpdatedAt: syncTimeUpdatedAt
+                    )
+                    .opacity(videoFadeInOpacity(at: context.date))
+                }
                     .clipShape(tileShape)
                     .shadow(color: .black.opacity(editMode ? 0 : 0.45), radius: editMode ? 0 : 16, y: editMode ? 0 : 8)
             } else {
@@ -1873,6 +1876,13 @@ private struct LoopTile: View {
 
     private var effectiveLoopVideoZoom: Double {
         max(1, slot.videoZoom)
+    }
+
+    private func videoFadeInOpacity(at date: Date) -> Double {
+        guard let createdAt = slot.createdAt else { return 1 }
+        let duration = 2.5
+        let elapsed = date.timeIntervalSince(createdAt)
+        return max(0, min(1, elapsed / duration))
     }
 
     private var ringColor: Color? {
