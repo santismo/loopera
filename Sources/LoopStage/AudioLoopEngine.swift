@@ -76,6 +76,7 @@ final class AudioLoopEngine: @unchecked Sendable {
     private var fadeMode: LoopFadeMode = .toLoopEnd
     private var masterVolume: Float = 1
     private var selectedOutputDeviceUID: String?
+    private var outputDeviceApplyPending = false
 
     init() {
         configureEngine()
@@ -121,16 +122,19 @@ final class AudioLoopEngine: @unchecked Sendable {
     @discardableResult
     func setOutputDevice(uniqueID: String?) -> Bool {
         lock.lock()
-        let isCapturingLoop = listeningSlot != nil || recordingSlot != nil
-        lock.unlock()
-        guard !isCapturingLoop else {
-            return true
-        }
-
-        if selectedOutputDeviceUID == uniqueID {
+        if selectedOutputDeviceUID == uniqueID, !outputDeviceApplyPending {
+            lock.unlock()
             return true
         }
         selectedOutputDeviceUID = uniqueID
+        let isCapturingLoop = listeningSlot != nil || recordingSlot != nil
+        if isCapturingLoop {
+            outputDeviceApplyPending = true
+            lock.unlock()
+            return true
+        }
+        lock.unlock()
+
         let wasRunning = engine.isRunning
         if wasRunning {
             engine.pause()
@@ -139,7 +143,20 @@ final class AudioLoopEngine: @unchecked Sendable {
         if wasRunning {
             try? engine.start()
         }
+        lock.lock()
+        outputDeviceApplyPending = !didApply
+        lock.unlock()
         return didApply
+    }
+
+    @discardableResult
+    func applyPendingOutputDeviceIfNeeded() -> Bool {
+        lock.lock()
+        let shouldApply = outputDeviceApplyPending && listeningSlot == nil && recordingSlot == nil
+        let uniqueID = selectedOutputDeviceUID
+        lock.unlock()
+        guard shouldApply else { return true }
+        return setOutputDevice(uniqueID: uniqueID)
     }
 
     func armThreshold(slot: Int, preBufferMilliseconds: Double) {

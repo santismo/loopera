@@ -60,6 +60,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var completedAudioDurations: [Int: TimeInterval] = [:]
     private var completedVideoEndTrims: [Int: TimeInterval] = [:]
     private var completedVideoStartTrims: [Int: TimeInterval] = [:]
+    private var pendingVideoOutputURLs: [Int: URL] = [:]
     private var recordingSlotByOutputURL: [URL: Int] = [:]
     private var activeVideoRecordingMode: VideoInputMode?
     private var pendingStopOnMasterBoundary = false
@@ -492,6 +493,7 @@ final class CaptureController: NSObject, ObservableObject {
         slots[slotPosition].isStopping = false
         slots[slotPosition].stoppingStartedAt = nil
         audioLoopEngine.clear(slot: number)
+        pendingVideoOutputURLs[number] = nil
         loopPlaybackTimes[number] = nil
         previousStoppingPhases[number] = nil
         status = "Cleared slot \(number)."
@@ -513,6 +515,7 @@ final class CaptureController: NSObject, ObservableObject {
         selectedSlotIndex = nil
         loopPlaybackTimes.removeAll()
         previousStoppingPhases.removeAll()
+        pendingVideoOutputURLs.removeAll()
         audioLoopEngine.clearAll()
         status = "Cleared loops."
     }
@@ -773,7 +776,7 @@ final class CaptureController: NSObject, ObservableObject {
         recordingSlotIndex = number
         slots[slotPosition].state = .armed
         isRecording = true
-        scheduleLoopVideoRecording(to: outputURL, slot: number)
+        pendingVideoOutputURLs[number] = outputURL
         status = "Slot \(number) armed for the next master start."
     }
 
@@ -961,7 +964,22 @@ final class CaptureController: NSObject, ObservableObject {
                 }
             }
         }
+        applyPendingOutputRouteAfterCapture()
         status = audioLoopCompleted ? "Audio loop playing. Finishing video..." : "Finishing loop..."
+    }
+
+    private func applyPendingOutputRouteAfterCapture() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(200))
+            guard let self, !self.isRecording else { return }
+            let audioLoopEngine = self.audioLoopEngine
+            let applied = await Task.detached(priority: .userInitiated) {
+                audioLoopEngine.applyPendingOutputDeviceIfNeeded()
+            }.value
+            if !applied {
+                self.status = "Could not apply selected loop audio output."
+            }
+        }
     }
 
     private func startLoopVideoRecording(to outputURL: URL, slot: Int) -> Bool {
@@ -1229,6 +1247,9 @@ final class CaptureController: NSObject, ObservableObject {
             pendingStartDate = Date().addingTimeInterval(-preRoll)
             slots[slotPosition].state = .recording
             audioLoopEngine.beginRecordingSyncedToMaster(slot: recordingSlotIndex)
+            if let outputURL = pendingVideoOutputURLs.removeValue(forKey: recordingSlotIndex) {
+                scheduleLoopVideoRecording(to: outputURL, slot: recordingSlotIndex)
+            }
             status = "Recording slot \(recordingSlotIndex)..."
             return
         }
