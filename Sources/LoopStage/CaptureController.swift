@@ -718,12 +718,7 @@ final class CaptureController: NSObject, ObservableObject {
         recordingSlotIndex = number
         slots[slotPosition].state = .recording
         audioLoopEngine.beginRecording(slot: number, usePreBuffer: false)
-        guard startLoopVideoRecording(to: outputURL, slot: number) else {
-            audioLoopEngine.clear(slot: number)
-            slots[slotPosition].state = .empty
-            recordingSlotIndex = nil
-            return
-        }
+        _ = startLoopVideoRecording(to: outputURL, slot: number)
         isRecording = true
         status = "Recording slot \(number)..."
 
@@ -768,11 +763,7 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStartTrimSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .armed
-        guard startLoopVideoRecording(to: outputURL, slot: number) else {
-            slots[slotPosition].state = .empty
-            recordingSlotIndex = nil
-            return
-        }
+        _ = startLoopVideoRecording(to: outputURL, slot: number)
         isRecording = true
         status = "Slot \(number) armed for the next master start."
     }
@@ -797,12 +788,7 @@ final class CaptureController: NSObject, ObservableObject {
         recordingSlotIndex = number
         slots[slotPosition].state = .listening
         audioLoopEngine.armThreshold(slot: number, preBufferMilliseconds: thresholdLeadMilliseconds)
-        guard startLoopVideoRecording(to: outputURL, slot: number) else {
-            audioLoopEngine.clear(slot: number)
-            slots[slotPosition].state = .empty
-            recordingSlotIndex = nil
-            return
-        }
+        _ = startLoopVideoRecording(to: outputURL, slot: number)
         isRecording = true
         status = "Slot 1 listening for threshold."
     }
@@ -1272,7 +1258,6 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
     }
 
     private func handleLoopVideoFinished(outputFileURL: URL, error: Error?) async {
-        isRecording = false
         activeVideoRecordingMode = nil
 
         let finishedSlotIndex = recordingSlotByOutputURL.removeValue(forKey: outputFileURL) ?? recordingSlotIndex
@@ -1290,6 +1275,9 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
                 if recordingSlotIndex == finishedSlotIndex {
                     self.recordingSlotIndex = nil
                 }
+            } else if isRecording, recordingSlotIndex == finishedSlotIndex {
+                slots[slotPosition].url = nil
+                status = "Video failed, audio recording kept: \(error.localizedDescription)"
             } else {
                 slots[slotPosition].state = .empty
                 status = "Recording failed: \(error.localizedDescription)"
@@ -1569,6 +1557,11 @@ extension CaptureController: AVCaptureAudioDataOutputSampleBufferDelegate {
         } else {
             crossedThreshold = false
         }
+        if crossedThreshold {
+            Task { @MainActor in
+                markThresholdCrossed(presentationTime: pts)
+            }
+        }
         let shouldPublishMeter = crossedThreshold ||
             analysis.peak >= thresholdForCapture * 0.35 ||
             now.timeIntervalSince(lastMeterPublishDateForCapture) >= 1.0 / 20.0
@@ -1576,9 +1569,6 @@ extension CaptureController: AVCaptureAudioDataOutputSampleBufferDelegate {
             lastMeterPublishDateForCapture = now
             Task { @MainActor in
                 updateInputMeter(rms: analysis.rms, peak: analysis.peak, presentationTime: pts)
-                if crossedThreshold {
-                    markThresholdCrossed(presentationTime: pts)
-                }
             }
         }
     }
