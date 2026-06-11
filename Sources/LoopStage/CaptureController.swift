@@ -348,6 +348,12 @@ final class CaptureController: NSObject, ObservableObject {
                 status = "Slot \(recordingSlotIndex) is waiting for the master start."
                 return
             }
+            if recordingSlotIndex == 1,
+               let slotPosition = slots.firstIndex(where: { $0.index == 1 }),
+               slots[slotPosition].state == .listening,
+               audioLoopEngine.currentRecordingDuration(slot: 1) != nil {
+                markThresholdCrossed(presentationTime: thresholdPTS ?? captureStartPTS ?? .zero)
+            }
             stopRecordingQuantized()
             return
         }
@@ -685,11 +691,11 @@ final class CaptureController: NSObject, ObservableObject {
     private func markThresholdCrossed(presentationTime: CMTime) {
         guard let masterPosition = slots.firstIndex(where: { $0.index == 1 }),
               slots[masterPosition].state == .listening,
-              isRecording,
               recordingSlotIndex == 1,
               thresholdDate == nil
         else { return }
 
+        isRecording = true
         thresholdPTS = presentationTime
         thresholdDate = Date()
         pendingStartDate = thresholdDate
@@ -717,9 +723,9 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStartTrimSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .recording
+        isRecording = true
         audioLoopEngine.beginRecording(slot: number, usePreBuffer: false)
         _ = startLoopVideoRecording(to: outputURL, slot: number)
-        isRecording = true
         status = "Recording slot \(number)..."
 
         stopTask?.cancel()
@@ -763,8 +769,8 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStartTrimSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .armed
-        _ = startLoopVideoRecording(to: outputURL, slot: number)
         isRecording = true
+        _ = startLoopVideoRecording(to: outputURL, slot: number)
         status = "Slot \(number) armed for the next master start."
     }
 
@@ -787,9 +793,9 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStartTrimSeconds = 0
         recordingSlotIndex = number
         slots[slotPosition].state = .listening
+        isRecording = true
         audioLoopEngine.armThreshold(slot: number, preBufferMilliseconds: thresholdLeadMilliseconds)
         _ = startLoopVideoRecording(to: outputURL, slot: number)
-        isRecording = true
         status = "Slot 1 listening for threshold."
     }
 
