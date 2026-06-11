@@ -50,6 +50,8 @@ struct LoopPlayerView: NSViewRepresentable {
     let audioOutputDeviceID: String?
     let videoZoom: Double
     let videoSyncOffset: TimeInterval
+    let fadeInDuration: TimeInterval
+    let videoGravity: AVLayerVideoGravity
     let playbackClock: LoopPlaybackClock
     let syncTime: TimeInterval
     let syncTimeUpdatedAt: Date
@@ -72,6 +74,8 @@ struct LoopPlayerView: NSViewRepresentable {
             audioOutputDeviceID: audioOutputDeviceID,
             videoZoom: videoZoom,
             videoSyncOffset: videoSyncOffset,
+            fadeInDuration: fadeInDuration,
+            videoGravity: videoGravity,
             playbackClock: playbackClock,
             syncTime: syncTime,
             syncTimeUpdatedAt: syncTimeUpdatedAt,
@@ -93,6 +97,8 @@ struct LoopPlayerView: NSViewRepresentable {
             audioOutputDeviceID: audioOutputDeviceID,
             videoZoom: videoZoom,
             videoSyncOffset: videoSyncOffset,
+            fadeInDuration: fadeInDuration,
+            videoGravity: videoGravity,
             playbackClock: playbackClock,
             syncTime: syncTime,
             syncTimeUpdatedAt: syncTimeUpdatedAt,
@@ -110,6 +116,7 @@ struct LoopPlayerView: NSViewRepresentable {
         private var previousAudioPhase: TimeInterval?
         private var currentVideoZoom: Double = 1
         private var currentVideoSyncOffset: TimeInterval = 0
+        private var currentAudioOutputDeviceID: String?
         private weak var playerLayer: AVPlayerLayer?
         private var didFadeIn = false
         private var isFadingOut = false
@@ -126,6 +133,8 @@ struct LoopPlayerView: NSViewRepresentable {
             audioOutputDeviceID: String?,
             videoZoom: Double,
             videoSyncOffset: TimeInterval,
+            fadeInDuration: TimeInterval,
+            videoGravity: AVLayerVideoGravity,
             playbackClock: LoopPlaybackClock,
             syncTime: TimeInterval,
             syncTimeUpdatedAt: Date,
@@ -155,7 +164,7 @@ struct LoopPlayerView: NSViewRepresentable {
                 self.player = player
                 playerLayer = layer
                 layer.player = player
-                layer.videoGravity = .resizeAspectFill
+                layer.videoGravity = videoGravity
                 layer.opacity = 0
                 let initialSeconds = targetVideoSeconds(
                     syncTime: syncTime,
@@ -166,9 +175,14 @@ struct LoopPlayerView: NSViewRepresentable {
                 let initialTime = CMTimeAdd(start, CMTime(seconds: max(0, initialSeconds), preferredTimescale: 600))
                 player.seek(to: initialTime, toleranceBefore: .zero, toleranceAfter: .zero)
             }
+            layer.videoGravity = videoGravity
 
             player?.isMuted = isMuted
-            player?.audioOutputDeviceUniqueID = audioOutputDeviceID
+            let desiredOutputDeviceID = isMuted ? nil : audioOutputDeviceID
+            if currentAudioOutputDeviceID != desiredOutputDeviceID {
+                player?.audioOutputDeviceUniqueID = desiredOutputDeviceID
+                currentAudioOutputDeviceID = desiredOutputDeviceID
+            }
             if isPlaying {
                 let currentAudioPhase = audioPhaseSeconds(syncTime: syncTime, syncTimeUpdatedAt: syncTimeUpdatedAt, duration: duration)
                 if isStopping {
@@ -183,7 +197,7 @@ struct LoopPlayerView: NSViewRepresentable {
                 }
                 player?.play()
                 if !isStopping {
-                    fadeInIfNeeded()
+                    fadeInIfNeeded(duration: fadeInDuration)
                 }
             } else {
                 fadeOutAndReset(startOffset: startOffset)
@@ -232,11 +246,10 @@ struct LoopPlayerView: NSViewRepresentable {
         }
 
         @MainActor
-        private func fadeInIfNeeded() {
+        private func fadeInIfNeeded(duration: TimeInterval) {
             guard !didFadeIn, let playerLayer else { return }
             didFadeIn = true
-            playerLayer.removeAnimation(forKey: "loopera.opacity")
-            playerLayer.opacity = 1
+            animateOpacity(of: playerLayer, to: 1, duration: max(0.01, duration))
         }
 
         @MainActor

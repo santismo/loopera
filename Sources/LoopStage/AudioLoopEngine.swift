@@ -82,7 +82,9 @@ final class AudioLoopEngine: @unchecked Sendable {
     }
 
     func start() {
-        applySelectedOutputDevice()
+        if selectedOutputDeviceUID != nil {
+            applySelectedOutputDevice()
+        }
         if !engine.isRunning {
             try? engine.start()
         }
@@ -499,17 +501,11 @@ final class AudioLoopEngine: @unchecked Sendable {
     @discardableResult
     private func applySelectedOutputDevice() -> Bool {
         guard let audioUnit = engine.outputNode.audioUnit else { return false }
-        let deviceID: AudioDeviceID
-        if let selectedOutputDeviceUID {
-            guard let selectedDeviceID = Self.audioDeviceID(forUID: selectedOutputDeviceUID) else {
-                return false
-            }
-            deviceID = selectedDeviceID
-        } else {
-            guard let defaultDeviceID = Self.defaultOutputDeviceID() else {
-                return false
-            }
-            deviceID = defaultDeviceID
+        guard let selectedOutputDeviceUID else {
+            return true
+        }
+        guard let deviceID = Self.audioDeviceID(forUID: selectedOutputDeviceUID) else {
+            return false
         }
 
         var mutableDeviceID = deviceID

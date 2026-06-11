@@ -1079,22 +1079,46 @@ final class CaptureController: NSObject, ObservableObject {
         guard let connection = movieOutput.connection(with: .video) else { return }
         movieOutput.connection(with: .audio)?.isEnabled = false
         let videoDevice = videoDevices.first(where: { $0.uniqueID == selectedDeviceID }) ?? videoDevices.first
+        if let videoDevice {
+            applyPreferredRecordingFrameRate(to: videoDevice)
+        }
         let dimensions = videoDevice.map { CMVideoFormatDescriptionGetDimensions($0.activeFormat.formatDescription) }
         let width = Int(dimensions?.width ?? 1920)
         let height = Int(dimensions?.height ?? 1080)
+        let frameRate = preferredRecordingFrameRate(for: videoDevice)
         let bitrate = max(25_000_000, width * height * 14)
         movieOutput.setOutputSettings(
             [
                 AVVideoCodecKey: AVVideoCodecType.h264,
                 AVVideoCompressionPropertiesKey: [
                     AVVideoAverageBitRateKey: bitrate,
-                    AVVideoExpectedSourceFrameRateKey: 60,
-                    AVVideoMaxKeyFrameIntervalKey: 60,
+                    AVVideoExpectedSourceFrameRateKey: frameRate,
+                    AVVideoMaxKeyFrameIntervalKey: frameRate,
                     AVVideoAllowFrameReorderingKey: false
                 ]
             ],
             for: connection
         )
+    }
+
+    private func preferredRecordingFrameRate(for device: AVCaptureDevice?) -> Int {
+        let maxFrameRate = device?.activeFormat.videoSupportedFrameRateRanges
+            .map(\.maxFrameRate)
+            .max() ?? 60
+        return Int(min(60, max(24, maxFrameRate)).rounded())
+    }
+
+    private func applyPreferredRecordingFrameRate(to device: AVCaptureDevice) {
+        let frameRate = preferredRecordingFrameRate(for: device)
+        let frameDuration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
+        do {
+            try device.lockForConfiguration()
+            device.activeVideoMinFrameDuration = frameDuration
+            device.activeVideoMaxFrameDuration = frameDuration
+            device.unlockForConfiguration()
+        } catch {
+            status = "Could not lock camera frame rate: \(error.localizedDescription)"
+        }
     }
 
     private func startSession() {
