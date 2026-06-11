@@ -66,6 +66,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var pendingStopTrimEndSeconds: TimeInterval = 0
     private var pendingStartTrimSeconds: TimeInterval = 0
     private var pendingStopTargetDuration: TimeInterval?
+    private var pendingMovieStopAfterStart = false
     private var quantizeTask: Task<Void, Never>?
     private var reconfigureTask: Task<Void, Never>?
     private var outputRouteTask: Task<Void, Never>?
@@ -947,6 +948,10 @@ final class CaptureController: NSObject, ObservableObject {
         pendingStartTrimSeconds = 0
         if shouldStopMovie {
             movieOutput.stopRecording()
+        } else if activeVideoRecordingMode == .camera,
+                  recordingSlotIndex != nil,
+                  !recordingSlotByOutputURL.isEmpty {
+            pendingMovieStopAfterStart = true
         } else if shouldStopWindow {
             appWindowLoopRecorder.stop { [weak self] url, error in
                 Task { @MainActor in
@@ -960,6 +965,7 @@ final class CaptureController: NSObject, ObservableObject {
     private func startLoopVideoRecording(to outputURL: URL, slot: Int) -> Bool {
         recordingSlotByOutputURL[outputURL] = slot
         activeVideoRecordingMode = videoInputMode
+        pendingMovieStopAfterStart = false
         switch videoInputMode {
         case .camera:
             configureMovieOutputForHighQuality()
@@ -1254,6 +1260,19 @@ final class CaptureController: NSObject, ObservableObject {
 extension CaptureController: AVCaptureFileOutputRecordingDelegate {
     nonisolated func fileOutput(
         _ output: AVCaptureFileOutput,
+        didStartRecordingTo fileURL: URL,
+        from connections: [AVCaptureConnection]
+    ) {
+        Task { @MainActor in
+            if pendingMovieStopAfterStart, movieOutput.isRecording {
+                pendingMovieStopAfterStart = false
+                movieOutput.stopRecording()
+            }
+        }
+    }
+
+    nonisolated func fileOutput(
+        _ output: AVCaptureFileOutput,
         didFinishRecordingTo outputFileURL: URL,
         from connections: [AVCaptureConnection],
         error: Error?
@@ -1264,6 +1283,7 @@ extension CaptureController: AVCaptureFileOutputRecordingDelegate {
     }
 
     private func handleLoopVideoFinished(outputFileURL: URL, error: Error?) async {
+        pendingMovieStopAfterStart = false
         activeVideoRecordingMode = nil
 
         let finishedSlotIndex = recordingSlotByOutputURL.removeValue(forKey: outputFileURL) ?? recordingSlotIndex
